@@ -53,7 +53,13 @@ Chat works in game, but Claude can't answer pack-specific questions:
    Send the registry id and mod too (e.g. `create:wrench` from Create), for the held item and offhand.
 5. **Recent chat in context.** The player asked "what is that message that just popped up" and Claude couldn't
    see it. Keep the last ~10 non-/claude chat lines (mixin or ChatHud access) and send them with each message.
-6. Keep everything else blocked (no Bash). Update README privacy section.
+6. **Open the recipe in EMI.** Player asked "can it bring up the recipe?". Tell Claude (in CLAUDE.md) to end a
+   recipe answer with a marker like `[[recipe:create:wrench]]` or `[[uses:create:wrench]]`. The mod strips the
+   marker, shows a clickable "[Show recipe]" chat button, and opens EMI's recipe screen for that item
+   (EMI API, compileOnly soft dependency: verify `EmiApi.displayRecipes` / `displayUses` + `EmiStack.of` names
+   against EMI 1.1.x when building). Add `/claude recipe <item id>` too. If EMI is missing, skip the button.
+   JEI/REI support later.
+7. Keep everything else blocked (no Bash). Update README privacy section.
 
 In-game test results 2026-11-12 (transcript confirmed the [Game] line and mod list both reached Claude):
 Wrench recipe, Astral Tier III book, ME Controller: all "I don't know, check EMI". Web lookup: "I can't search".
