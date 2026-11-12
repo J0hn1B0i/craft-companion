@@ -49,7 +49,15 @@ Chat works in game, but Claude can't answer pack-specific questions:
    Before any edit-enabled message, zip the allowed folders to `craft-companion/backups/`; add `/claude undo`
    to restore the last backup. After a reply, list the changed files in chat and say whether `/reload` or a
    restart is needed.
-4. Keep everything else blocked (no Bash). Update README privacy section.
+4. **Item IDs in context.** In-game test sent "holding 1x Wrench", which is ambiguous with 470 mods.
+   Send the registry id and mod too (e.g. `create:wrench` from Create), for the held item and offhand.
+5. **Recent chat in context.** The player asked "what is that message that just popped up" and Claude couldn't
+   see it. Keep the last ~10 non-/claude chat lines (mixin or ChatHud access) and send them with each message.
+6. Keep everything else blocked (no Bash). Update README privacy section.
+
+In-game test results 2026-11-12 (transcript confirmed the [Game] line and mod list both reached Claude):
+Wrench recipe, Astral Tier III book, ME Controller: all "I don't know, check EMI". Web lookup: "I can't search".
+The player reports the ME Controller may not be craftable normally in this pack; check the recipe export.
 
 Test questions (Prominence II), all should be answered correctly after the fix:
 - Hold a Create item, then: "What's the recipe for what I'm holding, and what can I make with it?"
