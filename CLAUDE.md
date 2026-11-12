@@ -44,6 +44,14 @@ web search, `/claude edit` -> staged/ -> `/claude apply|discard|undo` (StagedEdi
 CLAUDE.md is migrated once (adds @instructions.md). Logo: docs/logo.png, icon in assets/craftcompanion/.
 Outside-game tests passed (recipes, chat, web, staged edit, apply, undo).
 
+## 1.2.0: natural language + Y/N
+No commands needed: every /claude message may stage edits (allowEdits), emit [[recipe:id]] / [[uses:id]] / [[undo]].
+The client turns those into a queue of Y/N questions (plain y/n typed in chat is intercepted with
+ClientSendMessageEvents.ALLOW_CHAT while a question is open, 5 min expiry; [Yes]/[No] buttons run /claude y|n).
+Outcomes of answers are prepended to the next prompt as [Since your last reply: ...] so Claude knows what was applied.
+Claude may Edit(CLAUDE.md) itself to save "remember ..." notes. Old commands (edit/apply/discard/undo/recipe/uses)
+still work but are no longer advertised. Outside-game tests passed for all of this.
+
 ## Not yet verified in game
 - Recipe export on a real pack (count, speed, odd modded recipes), EMI screen opening from a chat button click,
   chat capture of advancement/mod messages. Test questions:

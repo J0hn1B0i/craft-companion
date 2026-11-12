@@ -46,8 +46,11 @@ final class DefaultClaudeMd {
                 - Each message starts with a [Game: ...] line (position, held items with their ids, health)
                   and may include [Chat] lines: the most recent messages the player saw in game chat.
                   Use them when relevant. Don't repeat them back.
-                - If the player wants you to always remember something, tell them to add it to the
-                  "Notes about the player" section of craft-companion/CLAUDE.md.
+                - A [Since your last reply: ...] line tells you how the player answered your requests
+                  (applied, declined, undone). Trust it over what you said before.
+                - When the player asks you to remember something (base location, goals, preferences),
+                  add a short line to the "Notes about the player" section of CLAUDE.md with Edit,
+                  then confirm in a few words. Don't change anything else in that file.
 
                 ## This pack's recipes: always check, never guess
                 The mod exports every recipe the game has loaded, straight from the server, so the
@@ -63,11 +66,20 @@ final class DefaultClaudeMd {
                 - If the recipes folder is missing or empty, ask the player to send a message while in a world.
                 - Translate ids to names in your answer, and describe shaped grids row by row.
                 """);
+        s.append("""
+
+                ## Actions: work out what the player wants from their words
+                The player just talks to you. They don't know any special commands, so never tell them
+                to type one. Work out what they want and do it. Actions need their OK: the mod asks
+                "Y or N?" in chat for each action you request, and only acts on Y. So request the action
+                and, in your reply, say what will happen if they answer Y.
+                """);
         if (emi) {
             s.append("""
-                    - When your answer is about one specific item, end it with a marker on its own line:
-                      [[recipe:<item id>]] to offer a button showing how it's made, or [[uses:<item id>]]
-                      for what it's used in. The mod turns it into a button that opens %s.
+                    - Show a recipe in %1$s: put [[recipe:<item id>]] on its own line. For what an item is
+                      used in: [[uses:<item id>]]. Do this whenever the player asks to see, show or open a
+                      recipe, and also offer it at the end of any answer about one specific item's recipe.
+                      At most two markers per reply.
                     """.formatted(recipeViewer));
         }
         s.append(cfg.allowWeb
@@ -93,17 +105,18 @@ final class DefaultClaudeMd {
         s.append(cfg.allowEdits
                 ? """
 
-                ## Making changes
-                - Only when a message starts with [EDIT MODE] can you propose changes. Write the complete
-                  new file to staged/<folder>/<path>, for example staged/config/xaerominimap.txt.
-                  Copy the original exactly and change only what's needed. For a new datapack, write it
-                  under staged/datapacks/<pack name>/ with a pack.mcmeta (pack_format 15 for 1.20.1).
-                - Never touch the originals. The player reviews the list of staged files and clicks
-                  Apply; the mod backs up the originals so /claude undo can restore them.
-                - In your reply, say what you changed in one or two sentences and whether a restart
-                  (most config files) or /reload (datapacks) is needed.
-                - Without [EDIT MODE], don't stage anything. If the player wants a change, tell them to use
-                  /claude edit <what to change>.
+                ## Changing settings, recipes or loot
+                - When the player asks to change, turn on/off, tweak or fix something in a mod, find the
+                  right file (Grep ../config/ etc.), then write the complete new file to
+                  staged/<folder>/<path>, for example staged/config/xaerominimap.txt. Copy the original
+                  exactly and change only what's needed. For a new datapack, write it under
+                  staged/datapacks/<pack name>/ with a pack.mcmeta (pack_format 15 for 1.20.1).
+                - Only stage changes the player asked for. Never touch the originals: after your reply the
+                  mod lists the staged files and asks the player Y or N. On Y it backs up the originals
+                  and applies them.
+                - In your reply, say what you'll change in one or two sentences and whether a restart
+                  (most config files) or /reload (datapacks) is needed after they answer Y.
+                - If the player asks to undo or revert the last applied change, put [[undo]] on its own line.
                 """
                 : """
 

@@ -47,7 +47,7 @@ public final class ClaudeRunner {
         public boolean includeGameContext = true;
         /** Let Claude search the web and read web pages (wikis, guides). */
         public boolean allowWeb = true;
-        /** Allow /claude edit: Claude proposes config/datapack changes that you then apply. */
+        /** Let Claude propose config/datapack changes. Nothing changes until you answer Y. */
         public boolean allowEdits = true;
         /**
          * false (default) = hide ANTHROPIC_API_KEY from Claude Code so it uses your signed-in
@@ -63,7 +63,7 @@ public final class ClaudeRunner {
         int totalMessages;
     }
 
-    public enum Mode { CHAT, EDIT, COMPACT }
+    public enum Mode { CHAT, COMPACT }
 
     public record Reply(boolean ok, String text) {}
 
@@ -253,14 +253,15 @@ public final class ClaudeRunner {
             cmd.add("--add-dir"); // read-only: writes there are never allowed
             for (Path d : dirs) cmd.add(d.toString());
         }
-        List<String> tools = new ArrayList<>(List.of("Read", "Grep", "Glob"));
-        List<String> allowed = new ArrayList<>(List.of("Read", "Grep", "Glob"));
+        // Edit(CLAUDE.md): Claude may add notes to its own memory file when asked to remember something.
+        List<String> tools = new ArrayList<>(List.of("Read", "Grep", "Glob", "Edit"));
+        List<String> allowed = new ArrayList<>(List.of("Read", "Grep", "Glob", "Edit(CLAUDE.md)"));
         if (config.allowWeb) {
             tools.addAll(List.of("WebSearch", "WebFetch"));
             allowed.addAll(List.of("WebSearch", "WebFetch"));
         }
-        if (mode == Mode.EDIT) {
-            tools.addAll(List.of("Write", "Edit"));
+        if (config.allowEdits) { // Claude may stage changes; the player confirms before anything is applied
+            tools.add("Write");
             allowed.addAll(List.of("Write(staged/**)", "Edit(staged/**)"));
         }
         cmd.add("--allowedTools");

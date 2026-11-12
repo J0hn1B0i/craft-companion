@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
+import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
 import net.fabricmc.loader.api.metadata.ModMetadata;
@@ -41,6 +42,8 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     private static final Set<String> SKIP_IDS = Set.of("minecraft", "java", "fabricloader", "fabric-api", "craftcompanion");
     private static final Pattern MARKER = Pattern.compile("\\[\\[(recipe|uses):([a-z0-9_.-]+:[a-z0-9_./-]+)]]");
+    private static final Pattern UNDO_MARKER = Pattern.compile("\\[\\[undo]]");
+    private static final long QUESTION_MAX_AGE_MS = 5 * 60 * 1000;
     private static final int CHAT_LINES = 10;
     private static final long CHAT_MAX_AGE_MS = 10 * 60 * 1000;
 
@@ -50,6 +53,13 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     private record ChatLine(long time, String text) {}
     private static final Deque<ChatLine> recentChat = new ArrayDeque<>();
+
+    /** An action Claude asked for, waiting for the player's Y or N. */
+    private record Question(String text, Runnable onYes, Runnable onNo) {}
+    private static final Deque<Question> questions = new ArrayDeque<>();
+    private static long questionShownAt;
+    /** What happened to Claude's requests since its last reply; sent with the next message. */
+    private static final List<String> outcomes = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /** Work to run a couple of ticks later (after the chat screen has closed). */
     private static Runnable delayed;
@@ -74,6 +84,14 @@ public class CraftCompanionClient implements ClientModInitializer {
                 r.run();
             }
         });
+        // While Claude is waiting for an answer, a plain "y" or "n" typed in chat answers it
+        // instead of being sent to the server.
+        ClientSendMessageEvents.ALLOW_CHAT.register(message -> {
+            Boolean yes = parseAnswer(message);
+            if (yes == null || !hasQuestion()) return true;
+            MinecraftClient.getInstance().execute(() -> answer(yes));
+            return false;
+        });
         ClientReceiveMessageEvents.GAME.register((message, overlay) ->
                 remember((overlay ? "(action bar) " : "") + message.getString()));
         ClientReceiveMessageEvents.CHAT.register((message, signed, sender, params, time) ->
@@ -82,8 +100,8 @@ public class CraftCompanionClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
                 ClientCommandManager.literal("claude")
                         .executes(ctx -> {
-                            say(Text.literal("/claude <message> | edit <change> | apply | discard | undo | "
-                                    + "recipe <item id> | uses <item id> | status | compact | reset").formatted(Formatting.GRAY));
+                            say(Text.literal("Just type /claude and what you want, e.g. /claude show me the wrench recipe. "
+                                    + "Answer Claude's questions with y or n. Extras: /claude status | compact | reset").formatted(Formatting.GRAY));
                             return 1;
                         })
                         .then(ClientCommandManager.literal("status").executes(ctx -> {
@@ -99,10 +117,18 @@ public class CraftCompanionClient implements ClientModInitializer {
                             runner.reset().thenRun(() -> postNotice("Started a new conversation. CLAUDE.md is kept."));
                             return 1;
                         }))
+                        .then(ClientCommandManager.literal("y").executes(ctx -> {
+                            answer(true);
+                            return 1;
+                        }))
+                        .then(ClientCommandManager.literal("n").executes(ctx -> {
+                            answer(false);
+                            return 1;
+                        }))
                         .then(ClientCommandManager.literal("edit")
                                 .then(ClientCommandManager.argument("change", StringArgumentType.greedyString())
                                         .executes(ctx -> {
-                                            sendEdit(StringArgumentType.getString(ctx, "change"));
+                                            send(StringArgumentType.getString(ctx, "change"), ClaudeRunner.Mode.CHAT);
                                             return 1;
                                         })))
                         .then(ClientCommandManager.literal("apply").executes(ctx -> {
@@ -179,34 +205,33 @@ public class CraftCompanionClient implements ClientModInitializer {
     private static void send(String message, ClaudeRunner.Mode mode) {
         say(Text.literal("You: ").formatted(Formatting.AQUA)
                 .append(Text.literal(message).formatted(Formatting.WHITE)));
+        if (!questions.isEmpty()) {
+            questions.clear();
+            notice("(Skipped Claude's earlier question.)");
+        }
+        if (runner.config().allowEdits) {
+            runner.worker().execute(() -> {
+                try {
+                    edits.clear();
+                } catch (Exception ignored) {
+                }
+            });
+        }
         MinecraftClient mc = MinecraftClient.getInstance();
         String indexed = RecipeExporter.exportIfNeeded(mc, runner.chatDir(), runner.worker());
         if (indexed != null) notice(indexed);
         notice("Claude is thinking...");
 
         StringBuilder prompt = new StringBuilder();
-        if (mode == ClaudeRunner.Mode.EDIT) prompt.append("[EDIT MODE]\n");
+        if (!outcomes.isEmpty()) {
+            prompt.append("[Since your last reply: ").append(String.join("; ", outcomes)).append("]\n");
+            outcomes.clear();
+        }
         if (runner.config().includeGameContext) prompt.append(gameContext()).append('\n');
         prompt.append(message);
 
         runner.ask(prompt.toString(), mode, CraftCompanionClient::postNotice)
                 .thenAccept(r -> postReply(r, mode));
-    }
-
-    private static void sendEdit(String change) {
-        if (!runner.config().allowEdits) {
-            say(Text.literal("Edits are turned off. Set allowEdits to true in config/craftcompanion.json.")
-                    .formatted(Formatting.RED));
-            return;
-        }
-        runner.worker().execute(() -> {
-            try {
-                edits.clear();
-            } catch (Exception e) {
-                postError("Couldn't clear old staged changes: " + e.getMessage());
-            }
-        });
-        send(change, ClaudeRunner.Mode.EDIT);
     }
 
     /** Player state plus recent chat. Runs on the client thread. */
@@ -254,23 +279,26 @@ public class CraftCompanionClient implements ClientModInitializer {
     // ---------------------------------------------------------------- replies
 
     private static void postReply(ClaudeRunner.Reply r, ClaudeRunner.Mode mode) {
-        List<String[]> buttons = new ArrayList<>();
+        List<String[]> markers = new ArrayList<>();
+        boolean wantsUndo = false;
         String text = r.text();
         if (r.ok()) {
             Matcher m = MARKER.matcher(text);
-            while (m.find()) buttons.add(new String[]{m.group(1), m.group(2)});
-            text = MARKER.matcher(text).replaceAll("").strip();
+            while (m.find() && markers.size() < 2) markers.add(new String[]{m.group(1), m.group(2)});
+            wantsUndo = UNDO_MARKER.matcher(text).find();
+            text = UNDO_MARKER.matcher(MARKER.matcher(text).replaceAll("")).replaceAll("").strip();
         }
         String finalText = cleanMarkdown(text);
 
         List<String> staged = List.of();
-        if (mode == ClaudeRunner.Mode.EDIT && r.ok()) {
+        if (r.ok() && runner.config().allowEdits) {
             try {
                 staged = edits.pending();
             } catch (Exception ignored) {
             }
         }
         List<String> stagedFinal = staged;
+        boolean undoFinal = wantsUndo;
 
         MinecraftClient.getInstance().execute(() -> {
             if (!r.ok()) {
@@ -286,31 +314,99 @@ public class CraftCompanionClient implements ClientModInitializer {
                 say(msg);
                 first = false;
             }
-            if (first && buttons.isEmpty() && stagedFinal.isEmpty()) {
+            if (first && markers.isEmpty() && stagedFinal.isEmpty() && !undoFinal) {
                 say(Text.literal("Claude: (empty reply)").formatted(Formatting.GRAY));
             }
-            if (emi && !buttons.isEmpty()) {
-                MutableText row = Text.literal("  ");
-                for (String[] b : buttons) {
-                    boolean uses = b[0].equals("uses");
-                    row.append(button(uses ? "[Show uses]" : "[Show recipe]", Formatting.GREEN,
-                            "/claude " + b[0] + " " + b[1], (uses ? "What " : "How to make ") + b[1]
-                                    + (uses ? " is used in" : "") + " (opens EMI)"));
-                    row.append(" ");
-                }
-                say(row);
-            }
+
+            // Turn what Claude asked for into Y/N questions, asked one at a time.
             if (!stagedFinal.isEmpty()) {
-                say(Text.literal("Proposed changes:").formatted(Formatting.YELLOW));
-                for (String f : stagedFinal) say(Text.literal("  - " + f).formatted(Formatting.YELLOW));
-                say(Text.literal("  ")
-                        .append(button("[Apply]", Formatting.GREEN, "/claude apply", "Back up the originals and apply these changes"))
-                        .append(" ")
-                        .append(button("[Discard]", Formatting.RED, "/claude discard", "Throw these changes away")));
-            } else if (mode == ClaudeRunner.Mode.EDIT) {
-                say(Text.literal("No file changes were proposed.").formatted(Formatting.GRAY));
+                questions.add(new Question("Apply these changes? " + String.join(", ", stagedFinal)
+                        + " (the originals are backed up first)", CraftCompanionClient::apply,
+                        () -> {
+                            runner.worker().execute(() -> {
+                                try {
+                                    edits.clear();
+                                } catch (Exception ignored) {
+                                }
+                            });
+                            notice("OK, nothing was changed.");
+                            outcomes.add("player answered N, staged changes discarded");
+                        }));
             }
+            if (undoFinal) {
+                questions.add(new Question("Undo the last applied change?", CraftCompanionClient::undo,
+                        () -> {
+                            notice("OK, nothing was undone.");
+                            outcomes.add("player answered N to undo");
+                        }));
+            }
+            if (emi) {
+                for (String[] mk : markers) {
+                    boolean uses = mk[0].equals("uses");
+                    String name = itemName(mk[1]);
+                    if (name == null) continue;
+                    questions.add(new Question((uses ? "Show what " + name + " is used in" : "Show the " + name + " recipe")
+                            + " in EMI?", () -> {
+                        showInViewer(mk[1], uses);
+                        outcomes.add("player opened " + mk[1] + (uses ? " uses" : " recipe") + " in EMI");
+                    }, () -> outcomes.add("player declined opening " + mk[1] + " in EMI")));
+                }
+            }
+            askNext();
         });
+    }
+
+    // ---------------------------------------------------------------- Y/N questions
+
+    private static boolean hasQuestion() {
+        if (questions.isEmpty()) return false;
+        if (System.currentTimeMillis() - questionShownAt > QUESTION_MAX_AGE_MS) {
+            questions.clear();
+            return false;
+        }
+        return true;
+    }
+
+    private static void askNext() {
+        Question q = questions.peekFirst();
+        if (q == null) return;
+        questionShownAt = System.currentTimeMillis();
+        say(Text.literal("Claude asks: ").formatted(Formatting.YELLOW)
+                .append(Text.literal(q.text()).formatted(Formatting.WHITE))
+                .append(Text.literal("  Type ").formatted(Formatting.GRAY))
+                .append(Text.literal("y").formatted(Formatting.GREEN, Formatting.BOLD))
+                .append(Text.literal(" or ").formatted(Formatting.GRAY))
+                .append(Text.literal("n").formatted(Formatting.RED, Formatting.BOLD))
+                .append(Text.literal("  "))
+                .append(button("[Yes]", Formatting.GREEN, "/claude y", "Yes"))
+                .append(Text.literal(" "))
+                .append(button("[No]", Formatting.RED, "/claude n", "No")));
+    }
+
+    private static void answer(boolean yes) {
+        if (!hasQuestion()) {
+            notice("Claude isn't waiting for an answer.");
+            return;
+        }
+        Question q = questions.pollFirst();
+        (yes ? q.onYes() : q.onNo()).run();
+        askNext();
+    }
+
+    /** "y", "yes", "n", "no" (any case, optional punctuation) or null. */
+    private static Boolean parseAnswer(String message) {
+        String m = message.trim().toLowerCase(Locale.ROOT).replaceAll("[.!]+$", "");
+        return switch (m) {
+            case "y", "yes", "yeah", "yep", "sure", "ok", "okay" -> Boolean.TRUE;
+            case "n", "no", "nope", "nah" -> Boolean.FALSE;
+            default -> null;
+        };
+    }
+
+    private static String itemName(String itemId) {
+        Identifier id = Identifier.tryParse(itemId);
+        if (id == null || !Registries.ITEM.containsId(id)) return null;
+        return new ItemStack(Registries.ITEM.get(id)).getName().getString();
     }
 
     private static MutableText button(String label, Formatting color, String command, String hover) {
@@ -330,6 +426,7 @@ public class CraftCompanionClient implements ClientModInitializer {
                     return;
                 }
                 postNotice("Applied " + files.size() + " file(s): " + String.join(", ", files));
+                outcomes.add("player answered Y; applied (originals backed up, undo possible): " + String.join(", ", files));
                 postNotice("Originals are backed up; /claude undo puts them back. Config changes usually need a "
                         + "restart; datapack changes need /reload.");
             } catch (Exception e) {
@@ -343,7 +440,10 @@ public class CraftCompanionClient implements ClientModInitializer {
             try {
                 Optional<List<String>> r = edits.undo();
                 if (r.isEmpty()) postNotice("Nothing to undo.");
-                else postNotice("Restored: " + String.join(", ", r.get()) + ". Restart or /reload to see it.");
+                else {
+                    postNotice("Restored: " + String.join(", ", r.get()) + ". Restart or /reload to see it.");
+                    outcomes.add("last applied change was undone: " + String.join(", ", r.get()));
+                }
             } catch (Exception e) {
                 postError("Couldn't undo: " + e.getMessage());
             }

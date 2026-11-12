@@ -10,14 +10,19 @@ and can tweak mod settings for you.</p>
 > Unofficial fan project. Not affiliated with or endorsed by Anthropic or Mojang. "Claude" and "Claude Code" are trademarks of Anthropic.
 
 ## What it does
-- **Chat:** `/claude <message>`. Claude sees your position, biome, held items (with their mod) and your recent chat,
-  so "what's this?" and "what was that message?" just work.
-- **Your pack's recipes:** the first time you ask in a world, the mod indexes every recipe the server sent, including
-  modpack changes. Claude searches it instead of guessing.
-- **Show recipe buttons:** answers about an item come with **[Show recipe]** / **[Show uses]** buttons that open EMI.
+Type `/claude` and just say what you want. There are no other commands to learn.
+- **Ask anything:** Claude sees your position, biome, held items (with their mod) and your recent chat,
+  so "what's this thing for?" and "what was that message?" just work.
+- **Your pack's real recipes:** the first time you ask in a world, the mod indexes every recipe the server sent,
+  including modpack changes. Claude searches it instead of guessing.
+- **Show me the recipe:** Claude offers to open the recipe in EMI. Type `y` or `n`.
 - **Web lookups:** wikis, guides, boss info.
-- **Mod setting changes:** `/claude edit <what to change>`. Claude proposes changes to config files or datapacks;
-  you click **[Apply]** or **[Discard]**. Originals are backed up and `/claude undo` restores them.
+- **Change mod settings:** "make my minimap show coordinates". Claude prepares the change and asks; type `y` to apply.
+  Originals are backed up, so "undo that" works too.
+- **Remembers you:** "remember my base is at 100 70 200" is saved to its notes for good.
+
+Nothing happens to your game or files without a `y` from you. Questions also have clickable [Yes] / [No] buttons,
+and a plain `y` or `n` typed while Claude is waiting is never sent to the server.
 
 It runs [Claude Code](https://claude.com/claude-code) on your own PC with your own Claude account, using the fast,
 low-usage Haiku model by default. Nothing goes through a third-party server.
@@ -38,20 +43,16 @@ low-usage Haiku model by default. Nothing goes through a third-party server.
 ## Commands
 | Command | What it does |
 | --- | --- |
-| `/claude <message>` | Ask Claude something |
-| `/claude edit <change>` | Ask Claude to change a mod setting or datapack. Nothing changes until you Apply |
-| `/claude apply` / `discard` | Apply or throw away the proposed changes (also clickable in chat) |
-| `/claude undo` | Restore the files from before the last Apply |
-| `/claude recipe <item id>` | Open EMI on how to make an item, e.g. `/claude recipe create:wrench` |
-| `/claude uses <item id>` | Open EMI on what an item is used in |
+| `/claude <anything>` | Talk to Claude: questions, "show me the recipe for…", "change…", "undo that", "remember…" |
+| `y` / `n` | Answer Claude's question (only while it's waiting) |
 | `/claude status` | Shows which Claude Code it found, settings, and when it will compact next |
 | `/claude compact` | Shrink the conversation now to save usage |
 | `/claude reset` | Start a new conversation (CLAUDE.md is kept) |
 
 ## How it remembers things
 The mod keeps its files in a `craft-companion` folder in your instance:
-- `CLAUDE.md`: Claude's lasting memory. Add your goals, base locations and play style under
-  "Notes about the player". Read with every message and never overwritten.
+- `CLAUDE.md`: Claude's lasting memory. Ask Claude to remember something, or edit the
+  "Notes about the player" section yourself. Read with every message; the mod never overwrites it.
 - `instructions.md` and `mods.md`: how Claude should help, and your mod list. Rewritten every launch.
 - `recipes/` and `items.txt`: the recipe and item index for the world you're in.
 - `staged/` and `backups/`: proposed changes and backups for `/claude undo`.
@@ -70,7 +71,7 @@ The conversation carries on between messages and game sessions. Every 20 message
 | `timeoutSeconds` | `180` | Give up on a reply after this long |
 | `includeGameContext` | `true` | Send position, biome, held items, health, food, time and recent chat with each message |
 | `allowWeb` | `true` | Let Claude search the web and read pages |
-| `allowEdits` | `true` | Allow `/claude edit` |
+| `allowEdits` | `true` | Let Claude propose setting changes (always asks before applying) |
 | `allowApiKey` | `false` | `false` hides `ANTHROPIC_API_KEY` so your plan is used. `true` lets Claude Code bill your API key |
 
 ## Privacy and safety
@@ -78,8 +79,9 @@ The conversation carries on between messages and game sessions. Every 20 message
   under your own account.
 - Claude can only **read and search** its own folder and your `config`, `defaultconfigs`, `datapacks` and `kubejs`
   folders, and use web search and fetch if `allowWeb` is on.
-- It **can't** run commands, read the rest of your PC, or change any game file directly. In edit mode it may only
-  write to `craft-companion/staged/`. Files change only when you click Apply, and the originals are backed up first.
+- It **can't** run commands, read the rest of your PC, or change any game file directly. It may only write
+  proposed changes to `craft-companion/staged/` and add notes to its own `CLAUDE.md`. Game files change only when
+  you answer `y`, and the originals are backed up first.
 - Your MCP servers and connectors are not loaded (`--strict-mcp-config`).
 
 ## Building from source
