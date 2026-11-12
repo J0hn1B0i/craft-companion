@@ -67,3 +67,18 @@ the buddy (config.buddyName). Outside-game tests passed (looking-at, screenshot 
   - "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
   - "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
   - `/claude edit make the minimap show my coordinates`, then Apply, then `/claude undo`.
+
+## NEXT TIME (player feedback after 1.3.0, 2026-11-12)
+1. **Panel text box too big.** Shrink BuddyScreen (pw max 300 / ph max 230 is too large); maybe ~200x150, smaller input.
+2. **Game feels a bit laggier than before.** Investigate. Suspects to measure first:
+   - END_CLIENT_TICK handler copies the `delayed` list every tick (allocation each tick); only copy when non-empty.
+   - BuddyHud draws every frame even when hidden? (returns early, but check) and wraps nothing heavy; BuddyScreen
+     re-wraps the whole log every frame: cache wrapped lines until the log changes.
+   - captureView() on the client thread (resizeSubRectTo on a full frame) when opening the panel / sending.
+   - RecipeExporter first-message hitch (~31k recipes + 22k item names on the client thread).
+   - findClaude() walks %LOCALAPPDATA%\Claude-Data on every message (worker thread, but disk I/O): cache the path.
+   Compare with the mod removed to confirm it's the mod at all (spark profiler is a good tool if the pack has it).
+3. **Optimize the modpack generally** (separate from the mod): check performance mods present/missing
+   (Sodium/Embeddium-equivalent, ModernFix, FerriteCore, Entity Culling, ImmediatelyFast, etc.), JVM args and
+   RAM allocation in minecraftinstance.json / CurseForge settings, render/simulation distance in options.txt,
+   shaders, and heavy mods. Report suggestions; change nothing without asking.
