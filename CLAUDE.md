@@ -42,9 +42,17 @@ Chat works in game, but Claude can't answer pack-specific questions:
    Give Claude read-only search over that folder (`--allowedTools Read Grep Glob`, cwd = craft-companion).
 2. **Web.** It runs with `--tools ""`, so no web search. Add config `allowWeb` (default true?) that enables
    `WebSearch` and `WebFetch` for wiki and guide lookups. Note: uses more of the plan per message.
-3. Keep everything else blocked (no Bash, Edit or Write). Update README privacy section.
+3. **File edits (opt-in).** The player wants Claude to change parts of mods. Add config `allowEdits` (default false,
+   since this is a public mod). When on: run with cwd = game dir and allow only `Edit`/`Write` inside `config/`,
+   `defaultconfigs/`, `kubejs/` (if present) and the world's `datapacks/`. Never `mods/` jars: compiled code
+   can't be edited sensibly; changes go through configs, KubeJS scripts or datapacks instead.
+   Before any edit-enabled message, zip the allowed folders to `craft-companion/backups/`; add `/claude undo`
+   to restore the last backup. After a reply, list the changed files in chat and say whether `/reload` or a
+   restart is needed.
+4. Keep everything else blocked (no Bash). Update README privacy section.
 
 Test questions (Prominence II), all should be answered correctly after the fix:
 - Hold a Create item, then: "What's the recipe for what I'm holding, and what can I make with it?"
 - "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
 - "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
+- (allowEdits on) "Make the Xaero minimap show my coordinates" or another small config change, then `/claude undo`.
