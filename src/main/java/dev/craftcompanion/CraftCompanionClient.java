@@ -6,13 +6,22 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.message.v1.ClientReceiveMessageEvents;
 import net.fabricmc.fabric.api.client.message.v1.ClientSendMessageEvents;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.ModContainer;
 import net.fabricmc.loader.api.metadata.ModMetadata;
+import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.texture.NativeImage;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.client.util.ScreenshotRecorder;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.registry.Registries;
@@ -22,7 +31,11 @@ import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.EntityHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
+import org.lwjgl.glfw.GLFW;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,10 +43,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -43,13 +58,16 @@ public class CraftCompanionClient implements ClientModInitializer {
     private static final Set<String> SKIP_IDS = Set.of("minecraft", "java", "fabricloader", "fabric-api", "craftcompanion");
     private static final Pattern MARKER = Pattern.compile("\\[\\[(recipe|uses):([a-z0-9_.-]+:[a-z0-9_./-]+)]]");
     private static final Pattern UNDO_MARKER = Pattern.compile("\\[\\[undo]]");
+    private static final Pattern NAME_MARKER = Pattern.compile("\\[\\[name:([^\\]]{1,24})]]");
     private static final long QUESTION_MAX_AGE_MS = 5 * 60 * 1000;
     private static final int CHAT_LINES = 10;
     private static final long CHAT_MAX_AGE_MS = 10 * 60 * 1000;
+    private static final int LOG_MAX = 200;
 
     private static ClaudeRunner runner;
     private static StagedEdits edits;
     private static boolean emi;
+    private static KeyBinding talkKey;
 
     private record ChatLine(long time, String text) {}
     private static final Deque<ChatLine> recentChat = new ArrayDeque<>();
@@ -59,11 +77,22 @@ public class CraftCompanionClient implements ClientModInitializer {
     private static final Deque<Question> questions = new ArrayDeque<>();
     private static long questionShownAt;
     /** What happened to Claude's requests since its last reply; sent with the next message. */
-    private static final List<String> outcomes = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static final List<String> outcomes = new CopyOnWriteArrayList<>();
 
-    /** Work to run a couple of ticks later (after the chat screen has closed). */
-    private static Runnable delayed;
-    private static int delayTicks;
+    /** Everything said in this session, shown in the buddy panel. Client thread only. */
+    private static final List<Text> log = new ArrayList<>();
+    /** True while the latest request came from the panel: replies go there instead of chat. */
+    private static boolean panelMode;
+    private static boolean summoned;
+    private static int busy;
+
+    /** Work to run some ticks later. Client thread only. */
+    private static final class Delayed {
+        int ticks;
+        final Runnable task;
+        Delayed(int ticks, Runnable task) { this.ticks = ticks; this.task = task; }
+    }
+    private static final List<Delayed> delayed = new ArrayList<>();
 
     @Override
     public void onInitializeClient() {
@@ -76,12 +105,25 @@ public class CraftCompanionClient implements ClientModInitializer {
         emi = FabricLoader.getInstance().isModLoaded("emi");
         writeContextFiles(gameDir, chatDir);
 
+        talkKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key.craftcompanion.talk",
+                InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_BACKSLASH, "key.categories.craftcompanion"));
+        HudRenderCallback.EVENT.register((ctx, tickDelta) -> BuddyHud.render(ctx));
+
         ClientLifecycleEvents.CLIENT_STOPPING.register(c -> runner.shutdown());
         ClientTickEvents.END_CLIENT_TICK.register(c -> {
-            if (delayed != null && --delayTicks <= 0) {
-                Runnable r = delayed;
-                delayed = null;
-                r.run();
+            for (Iterator<Delayed> it = new ArrayList<>(delayed).iterator(); it.hasNext(); ) {
+                Delayed d = it.next();
+                if (--d.ticks <= 0) {
+                    delayed.remove(d);
+                    d.task.run();
+                }
+            }
+            while (talkKey.wasPressed()) {
+                if (c.currentScreen == null && c.player != null) {
+                    captureView(); // before the panel covers part of the screen
+                    summoned = true;
+                    c.setScreen(new BuddyScreen());
+                }
             }
         });
         // While Claude is waiting for an answer, a plain "y" or "n" typed in chat answers it
@@ -100,12 +142,14 @@ public class CraftCompanionClient implements ClientModInitializer {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> dispatcher.register(
                 ClientCommandManager.literal("claude")
                         .executes(ctx -> {
-                            say(Text.literal("Just type /claude and what you want, e.g. /claude show me the wrench recipe. "
-                                    + "Answer Claude's questions with y or n. Extras: /claude status | compact | reset").formatted(Formatting.GRAY));
+                            String key = talkKey.getBoundKeyLocalizedText().getString();
+                            chat(Text.literal("Press " + key + " to talk to " + buddyName()
+                                    + ", or type /claude and what you want. Answer questions with y or n. "
+                                    + "Extras: /claude status | compact | reset").formatted(Formatting.GRAY));
                             return 1;
                         })
                         .then(ClientCommandManager.literal("status").executes(ctx -> {
-                            say(Text.literal(runner.status()).formatted(Formatting.GRAY));
+                            chat(Text.literal(runner.status()).formatted(Formatting.GRAY));
                             return 1;
                         }))
                         .then(ClientCommandManager.literal("compact").executes(ctx -> {
@@ -123,27 +167,6 @@ public class CraftCompanionClient implements ClientModInitializer {
                         }))
                         .then(ClientCommandManager.literal("n").executes(ctx -> {
                             answer(false);
-                            return 1;
-                        }))
-                        .then(ClientCommandManager.literal("edit")
-                                .then(ClientCommandManager.argument("change", StringArgumentType.greedyString())
-                                        .executes(ctx -> {
-                                            send(StringArgumentType.getString(ctx, "change"), ClaudeRunner.Mode.CHAT);
-                                            return 1;
-                                        })))
-                        .then(ClientCommandManager.literal("apply").executes(ctx -> {
-                            apply();
-                            return 1;
-                        }))
-                        .then(ClientCommandManager.literal("discard").executes(ctx -> {
-                            runner.worker().execute(() -> {
-                                try {
-                                    edits.clear();
-                                    postNotice("Discarded the proposed changes.");
-                                } catch (Exception e) {
-                                    postError("Couldn't discard: " + e.getMessage());
-                                }
-                            });
                             return 1;
                         }))
                         .then(ClientCommandManager.literal("undo").executes(ctx -> {
@@ -164,9 +187,42 @@ public class CraftCompanionClient implements ClientModInitializer {
                                         })))
                         .then(ClientCommandManager.argument("message", StringArgumentType.greedyString())
                                 .executes(ctx -> {
-                                    send(StringArgumentType.getString(ctx, "message"), ClaudeRunner.Mode.CHAT);
+                                    String msg = StringArgumentType.getString(ctx, "message");
+                                    // Wait for the chat screen to close so the screenshot shows the world.
+                                    later(2, () -> {
+                                        captureView();
+                                        send(msg, false);
+                                    });
                                     return 1;
                                 }))));
+    }
+
+    // ---------------------------------------------------------------- for the HUD and panel
+
+    static String buddyName() {
+        String n = runner.config().buddyName;
+        return n == null || n.isBlank() ? "Sprout" : n;
+    }
+
+    static boolean isBusy() { return busy > 0; }
+
+    static boolean buddyShown() {
+        return summoned || busy > 0 || hasQuestion() || runner.config().buddyAlwaysVisible;
+    }
+
+    static void setSummoned(boolean s) { summoned = s; }
+
+    static List<Text> log() { return log; }
+
+    /** A line typed into the panel. */
+    static void fromPanel(String text) {
+        Boolean yes = parseAnswer(text);
+        if (yes != null && hasQuestion()) {
+            panelMode = true;
+            answer(yes);
+            return;
+        }
+        send(text, true);
     }
 
     // ---------------------------------------------------------------- context files
@@ -192,22 +248,31 @@ public class CraftCompanionClient implements ClientModInitializer {
             } else {
                 DefaultClaudeMd.migrate(claudeMd);
             }
-            Files.writeString(chatDir.resolve("instructions.md"),
-                    DefaultClaudeMd.instructions(runner.config(), emi, "EMI"));
+            writeInstructions();
             Files.writeString(chatDir.resolve("mods.md"), modsMd);
         } catch (Exception e) {
             System.err.println("[craftcompanion] couldn't write context files: " + e);
         }
     }
 
+    private static void writeInstructions() {
+        try {
+            Files.writeString(runner.chatDir().resolve("instructions.md"),
+                    DefaultClaudeMd.instructions(runner.config(), emi, "EMI", buddyName()));
+        } catch (Exception e) {
+            System.err.println("[craftcompanion] couldn't write instructions: " + e);
+        }
+    }
+
     // ---------------------------------------------------------------- sending
 
-    private static void send(String message, ClaudeRunner.Mode mode) {
+    private static void send(String message, boolean fromPanel) {
+        panelMode = fromPanel;
         say(Text.literal("You: ").formatted(Formatting.AQUA)
                 .append(Text.literal(message).formatted(Formatting.WHITE)));
         if (!questions.isEmpty()) {
             questions.clear();
-            notice("(Skipped Claude's earlier question.)");
+            notice("(Skipped the earlier question.)");
         }
         if (runner.config().allowEdits) {
             runner.worker().execute(() -> {
@@ -220,7 +285,7 @@ public class CraftCompanionClient implements ClientModInitializer {
         MinecraftClient mc = MinecraftClient.getInstance();
         String indexed = RecipeExporter.exportIfNeeded(mc, runner.chatDir(), runner.worker());
         if (indexed != null) notice(indexed);
-        notice("Claude is thinking...");
+        if (!fromPanel) notice(buddyName() + " is thinking...");
 
         StringBuilder prompt = new StringBuilder();
         if (!outcomes.isEmpty()) {
@@ -230,11 +295,38 @@ public class CraftCompanionClient implements ClientModInitializer {
         if (runner.config().includeGameContext) prompt.append(gameContext()).append('\n');
         prompt.append(message);
 
-        runner.ask(prompt.toString(), mode, CraftCompanionClient::postNotice)
-                .thenAccept(r -> postReply(r, mode));
+        busy++;
+        runner.ask(prompt.toString(), ClaudeRunner.Mode.CHAT, CraftCompanionClient::postNotice)
+                .thenAccept(CraftCompanionClient::postReply);
     }
 
-    /** Player state plus recent chat. Runs on the client thread. */
+    /** Saves the current frame (downscaled) to craft-companion/view.png. Client thread. */
+    private static void captureView() {
+        if (!runner.config().allowScreenshots) return;
+        MinecraftClient mc = MinecraftClient.getInstance();
+        try {
+            NativeImage full = ScreenshotRecorder.takeScreenshot(mc.getFramebuffer());
+            int w = Math.min(1280, full.getWidth());
+            int h = Math.max(1, full.getHeight() * w / full.getWidth());
+            NativeImage small = new NativeImage(w, h, false);
+            full.resizeSubRectTo(0, 0, full.getWidth(), full.getHeight(), small);
+            full.close();
+            Path out = runner.chatDir().resolve("view.png");
+            runner.worker().execute(() -> {
+                try {
+                    small.writeTo(out);
+                } catch (Exception e) {
+                    System.err.println("[craftcompanion] couldn't save view: " + e);
+                } finally {
+                    small.close();
+                }
+            });
+        } catch (Throwable t) {
+            System.err.println("[craftcompanion] couldn't capture view: " + t);
+        }
+    }
+
+    /** Player state, what they're looking at, and recent chat. Client thread. */
     private static String gameContext() {
         MinecraftClient mc = MinecraftClient.getInstance();
         ClientPlayerEntity p = mc.player;
@@ -250,6 +342,9 @@ public class CraftCompanionClient implements ClientModInitializer {
                 pos.getX(), pos.getY(), pos.getZ(), dim, biome,
                 describe(p.getMainHandStack()), describe(p.getOffHandStack()),
                 p.getHealth(), p.getMaxHealth(), p.getHungerManager().getFoodLevel(), day, tod));
+        String looking = lookingAt(mc);
+        if (looking != null) sb.append("\n[Looking at: ").append(looking).append(']');
+        if (runner.config().allowScreenshots) sb.append("\n[Screenshot of the player's view: view.png]");
         long now = System.currentTimeMillis();
         synchronized (recentChat) {
             for (ChatLine c : recentChat) {
@@ -259,6 +354,43 @@ public class CraftCompanionClient implements ClientModInitializer {
             }
         }
         return sb.toString();
+    }
+
+    /** The entity or block under the crosshair (blocks up to 64 blocks away). */
+    private static String lookingAt(MinecraftClient mc) {
+        try {
+            HitResult hit = mc.crosshairTarget;
+            if (hit instanceof EntityHitResult eh) {
+                Entity e = eh.getEntity();
+                Identifier type = Registries.ENTITY_TYPE.getId(e.getType());
+                StringBuilder sb = new StringBuilder(e.getName().getString())
+                        .append(" (").append(type).append(", ").append(RecipeExporter.modName(type.getNamespace())).append(")");
+                if (e instanceof LivingEntity le) {
+                    sb.append(String.format(", health %.0f/%.0f", le.getHealth(), le.getMaxHealth()));
+                }
+                sb.append(String.format(", %.0f blocks away", Math.sqrt(e.squaredDistanceTo(mc.player))));
+                return sb.toString();
+            }
+            Entity cam = mc.getCameraEntity();
+            if (cam == null) return null;
+            HitResult far = cam.raycast(64, 1.0f, false);
+            if (far instanceof BlockHitResult bh && far.getType() == HitResult.Type.BLOCK) {
+                BlockPos bp = bh.getBlockPos();
+                BlockState state = mc.world.getBlockState(bp);
+                Identifier id = Registries.BLOCK.getId(state.getBlock());
+                StringBuilder sb = new StringBuilder(state.getBlock().getName().getString())
+                        .append(" (").append(id).append(", ").append(RecipeExporter.modName(id.getNamespace())).append(")")
+                        .append(" at ").append(bp.getX()).append(' ').append(bp.getY()).append(' ').append(bp.getZ())
+                        .append(String.format(", %.0f blocks away", Math.sqrt(bp.getSquaredDistance(cam.getPos()))));
+                String props = state.getEntries().entrySet().stream().limit(6)
+                        .map(en -> en.getKey().getName() + "=" + en.getValue())
+                        .collect(Collectors.joining(", "));
+                if (!props.isEmpty()) sb.append(", state: ").append(props);
+                return sb.toString();
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private static String describe(ItemStack s) {
@@ -278,15 +410,19 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     // ---------------------------------------------------------------- replies
 
-    private static void postReply(ClaudeRunner.Reply r, ClaudeRunner.Mode mode) {
+    private static void postReply(ClaudeRunner.Reply r) {
         List<String[]> markers = new ArrayList<>();
         boolean wantsUndo = false;
+        String newName = null;
         String text = r.text();
         if (r.ok()) {
             Matcher m = MARKER.matcher(text);
             while (m.find() && markers.size() < 2) markers.add(new String[]{m.group(1), m.group(2)});
             wantsUndo = UNDO_MARKER.matcher(text).find();
-            text = UNDO_MARKER.matcher(MARKER.matcher(text).replaceAll("")).replaceAll("").strip();
+            Matcher nm = NAME_MARKER.matcher(text);
+            if (nm.find()) newName = nm.group(1).trim();
+            text = NAME_MARKER.matcher(UNDO_MARKER.matcher(MARKER.matcher(text).replaceAll("")).replaceAll(""))
+                    .replaceAll("").strip();
         }
         String finalText = cleanMarkdown(text);
 
@@ -299,23 +435,30 @@ public class CraftCompanionClient implements ClientModInitializer {
         }
         List<String> stagedFinal = staged;
         boolean undoFinal = wantsUndo;
+        String nameFinal = newName;
 
         MinecraftClient.getInstance().execute(() -> {
+            busy = Math.max(0, busy - 1);
             if (!r.ok()) {
-                say(Text.literal("[Claude] " + r.text()).formatted(Formatting.RED));
+                say(Text.literal("[" + buddyName() + "] " + r.text()).formatted(Formatting.RED));
                 return;
+            }
+            if (nameFinal != null && !nameFinal.isEmpty()) {
+                runner.config().buddyName = nameFinal;
+                runner.saveConfig();
+                writeInstructions();
             }
             boolean first = true;
             for (String line : finalText.split("\\R")) {
                 if (line.isBlank()) continue;
                 MutableText msg = first
-                        ? Text.literal("Claude: ").formatted(Formatting.GOLD).append(Text.literal(line).formatted(Formatting.WHITE))
+                        ? Text.literal(buddyName() + ": ").formatted(Formatting.GOLD).append(Text.literal(line).formatted(Formatting.WHITE))
                         : Text.literal("  " + line).formatted(Formatting.WHITE);
                 say(msg);
                 first = false;
             }
             if (first && markers.isEmpty() && stagedFinal.isEmpty() && !undoFinal) {
-                say(Text.literal("Claude: (empty reply)").formatted(Formatting.GRAY));
+                say(Text.literal(buddyName() + ": (empty reply)").formatted(Formatting.GRAY));
             }
 
             // Turn what Claude asked for into Y/N questions, asked one at a time.
@@ -358,7 +501,7 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     // ---------------------------------------------------------------- Y/N questions
 
-    private static boolean hasQuestion() {
+    static boolean hasQuestion() {
         if (questions.isEmpty()) return false;
         if (System.currentTimeMillis() - questionShownAt > QUESTION_MAX_AGE_MS) {
             questions.clear();
@@ -371,24 +514,29 @@ public class CraftCompanionClient implements ClientModInitializer {
         Question q = questions.peekFirst();
         if (q == null) return;
         questionShownAt = System.currentTimeMillis();
-        say(Text.literal("Claude asks: ").formatted(Formatting.YELLOW)
-                .append(Text.literal(q.text()).formatted(Formatting.WHITE))
-                .append(Text.literal("  Type ").formatted(Formatting.GRAY))
-                .append(Text.literal("y").formatted(Formatting.GREEN, Formatting.BOLD))
-                .append(Text.literal(" or ").formatted(Formatting.GRAY))
-                .append(Text.literal("n").formatted(Formatting.RED, Formatting.BOLD))
-                .append(Text.literal("  "))
-                .append(button("[Yes]", Formatting.GREEN, "/claude y", "Yes"))
-                .append(Text.literal(" "))
-                .append(button("[No]", Formatting.RED, "/claude n", "No")));
+        MutableText line = Text.literal(buddyName() + " asks: ").formatted(Formatting.YELLOW)
+                .append(Text.literal(q.text()).formatted(Formatting.WHITE));
+        log(line);
+        if (!panelMode) {
+            chat(line.copy()
+                    .append(Text.literal("  Type ").formatted(Formatting.GRAY))
+                    .append(Text.literal("y").formatted(Formatting.GREEN, Formatting.BOLD))
+                    .append(Text.literal(" or ").formatted(Formatting.GRAY))
+                    .append(Text.literal("n").formatted(Formatting.RED, Formatting.BOLD))
+                    .append(Text.literal("  "))
+                    .append(button("[Yes]", Formatting.GREEN, "/claude y", "Yes"))
+                    .append(Text.literal(" "))
+                    .append(button("[No]", Formatting.RED, "/claude n", "No")));
+        }
     }
 
-    private static void answer(boolean yes) {
+    static void answer(boolean yes) {
         if (!hasQuestion()) {
-            notice("Claude isn't waiting for an answer.");
+            notice(buddyName() + " isn't waiting for an answer.");
             return;
         }
         Question q = questions.pollFirst();
+        log(Text.literal("You: " + (yes ? "yes" : "no")).formatted(Formatting.AQUA));
         (yes ? q.onYes() : q.onNo()).run();
         askNext();
     }
@@ -427,7 +575,7 @@ public class CraftCompanionClient implements ClientModInitializer {
                 }
                 postNotice("Applied " + files.size() + " file(s): " + String.join(", ", files));
                 outcomes.add("player answered Y; applied (originals backed up, undo possible): " + String.join(", ", files));
-                postNotice("Originals are backed up; /claude undo puts them back. Config changes usually need a "
+                postNotice("Originals are backed up, so you can ask to undo it. Config changes usually need a "
                         + "restart; datapack changes need /reload.");
             } catch (Exception e) {
                 postError("Couldn't apply: " + e.getMessage());
@@ -464,18 +612,21 @@ public class CraftCompanionClient implements ClientModInitializer {
         }
         ItemStack stack = new ItemStack(Registries.ITEM.get(id));
         if (stack.isEmpty() || stack.isOf(Items.AIR)) return;
-        // Wait two ticks so the chat screen has closed before EMI opens its screen.
-        delayTicks = 2;
-        delayed = () -> {
+        // Wait two ticks so the chat screen or panel has closed before EMI opens its screen.
+        later(2, () -> {
             try {
                 EmiCompat.show(stack, uses);
             } catch (Throwable t) {
                 say(Text.literal("Couldn't open EMI: " + t.getMessage()).formatted(Formatting.RED));
             }
-        };
+        });
     }
 
-    // ---------------------------------------------------------------- chat helpers
+    // ---------------------------------------------------------------- output helpers
+
+    private static void later(int ticks, Runnable task) {
+        MinecraftClient.getInstance().execute(() -> delayed.add(new Delayed(ticks, task)));
+    }
 
     /** Minecraft chat can't render markdown, so strip the common bits. */
     private static String cleanMarkdown(String s) {
@@ -499,7 +650,18 @@ public class CraftCompanionClient implements ClientModInitializer {
         MinecraftClient.getInstance().execute(() -> say(Text.literal(text).formatted(Formatting.RED)));
     }
 
+    /** Adds to the panel history, and to game chat unless the conversation is happening in the panel. */
     private static void say(Text text) {
+        log(text);
+        if (!panelMode) chat(text);
+    }
+
+    private static void log(Text text) {
+        log.add(text);
+        while (log.size() > LOG_MAX) log.remove(0);
+    }
+
+    private static void chat(Text text) {
         MinecraftClient mc = MinecraftClient.getInstance();
         if (mc.inGameHud != null) mc.inGameHud.getChatHud().addMessage(text);
     }

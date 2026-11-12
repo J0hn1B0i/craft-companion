@@ -54,6 +54,12 @@ public final class ClaudeRunner {
          * Claude plan. true = let Claude Code use the key (pay-per-use API billing).
          */
         public boolean allowApiKey = false;
+        /** The corner buddy's name. Claude can change it when you ask. */
+        public String buddyName = "Sprout";
+        /** Save a screenshot of your view with each message so Claude can look when it helps. */
+        public boolean allowScreenshots = true;
+        /** Keep the buddy in the corner all the time, not only when summoned or busy. */
+        public boolean buddyAlwaysVisible = false;
     }
 
     /** Saved to craft-companion/state.json. */
@@ -111,6 +117,14 @@ public final class ClaudeRunner {
             }
         } catch (Exception e) {
             System.err.println("[craftcompanion] failed to load config: " + e);
+        }
+    }
+
+    public void saveConfig() {
+        try {
+            Files.writeString(configFile, GSON.toJson(config));
+        } catch (IOException e) {
+            System.err.println("[craftcompanion] failed to save config: " + e);
         }
     }
 

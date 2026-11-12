@@ -10,16 +10,18 @@ and can tweak mod settings for you.</p>
 > Unofficial fan project. Not affiliated with or endorsed by Anthropic or Mojang. "Claude" and "Claude Code" are trademarks of Anthropic.
 
 ## What it does
-Type `/claude` and just say what you want. There are no other commands to learn.
-- **Ask anything:** Claude sees your position, biome, held items (with their mod) and your recent chat,
-  so "what's this thing for?" and "what was that message?" just work.
+Press **\** (backslash, rebindable in Controls) and **Sprout**, a little grass-block buddy, pops up in the
+bottom-right corner with a chat panel. Just say what you want. (`/claude <message>` in normal chat works too.)
+- **Sees what you see:** it knows the block or mob under your crosshair, your position, biome, held items and
+  recent chat. It can look at a screenshot of your view when a question needs it ("what's that over there?").
 - **Your pack's real recipes:** the first time you ask in a world, the mod indexes every recipe the server sent,
-  including modpack changes. Claude searches it instead of guessing.
-- **Show me the recipe:** Claude offers to open the recipe in EMI. Type `y` or `n`.
+  including modpack changes. Sprout searches it instead of guessing.
+- **Show me the recipe:** Sprout offers to open the recipe in EMI. Answer `y` or `n`.
 - **Web lookups:** wikis, guides, boss info.
-- **Change mod settings:** "make my minimap show coordinates". Claude prepares the change and asks; type `y` to apply.
+- **Change mod settings:** "make my minimap show coordinates". Sprout prepares the change and asks; `y` applies it.
   Originals are backed up, so "undo that" works too.
-- **Remembers you:** "remember my base is at 100 70 200" is saved to its notes for good.
+- **Remembers you:** "remember my base is at 100 70 200" is saved to its notes. Rename it too: "your name is Pebble".
+- In the corner it bobs and blinks, shows "..." while thinking and "!" when it has a question for you.
 
 Nothing happens to your game or files without a `y` from you. Questions also have clickable [Yes] / [No] buttons,
 and a plain `y` or `n` typed while Claude is waiting is never sent to the server.
@@ -43,7 +45,8 @@ low-usage Haiku model by default. Nothing goes through a third-party server.
 ## Commands
 | Command | What it does |
 | --- | --- |
-| `/claude <anything>` | Talk to Claude: questions, "show me the recipe for…", "change…", "undo that", "remember…" |
+| **\** (key) | Open the buddy panel. Rebind under Controls > Craft Companion |
+| `/claude <anything>` | Talk from normal chat: questions, "show me the recipe for…", "change…", "undo that", "remember…" |
 | `y` / `n` | Answer Claude's question (only while it's waiting) |
 | `/claude status` | Shows which Claude Code it found, settings, and when it will compact next |
 | `/claude compact` | Shrink the conversation now to save usage |
@@ -72,11 +75,15 @@ The conversation carries on between messages and game sessions. Every 20 message
 | `includeGameContext` | `true` | Send position, biome, held items, health, food, time and recent chat with each message |
 | `allowWeb` | `true` | Let Claude search the web and read pages |
 | `allowEdits` | `true` | Let Claude propose setting changes (always asks before applying) |
+| `buddyName` | `"Sprout"` | Your buddy's name (it changes this itself when you rename it) |
+| `allowScreenshots` | `true` | Save a screenshot of your view with each message so Claude can look when needed |
+| `buddyAlwaysVisible` | `false` | Keep the buddy in the corner all the time, not only when summoned or busy |
 | `allowApiKey` | `false` | `false` hides `ANTHROPIC_API_KEY` so your plan is used. `true` lets Claude Code bill your API key |
 
 ## Privacy and safety
 - Your messages, the game info above and your last few chat lines are sent to Anthropic through Claude Code,
-  under your own account.
+  under your own account. A screenshot of your view is saved locally with each message and only sent if Claude
+  decides to look at it (turn off with `allowScreenshots`).
 - Claude can only **read and search** its own folder and your `config`, `defaultconfigs`, `datapacks` and `kubejs`
   folders, and use web search and fetch if `allowWeb` is on.
 - It **can't** run commands, read the rest of your PC, or change any game file directly. It may only write

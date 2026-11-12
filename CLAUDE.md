@@ -52,6 +52,14 @@ Outcomes of answers are prepended to the next prompt as [Since your last reply: 
 Claude may Edit(CLAUDE.md) itself to save "remember ..." notes. Old commands (edit/apply/discard/undo/recipe/uses)
 still work but are no longer advertised. Outside-game tests passed for all of this.
 
+## 1.3.0: corner buddy
+BuddyHud (HudRenderCallback, icon.png 32px, bob/blink, "..."/"!" bubble) shows when summoned, busy or asking.
+Key `key.craftcompanion.talk` (default backslash; the dev's own pack uses L) captures view.png then opens BuddyScreen:
+a non-pausing panel with history (log), input, Yes/No buttons, Hide. Replies go to the panel when the request
+came from it (panelMode), otherwise to chat. Context adds [Looking at: ...] (crosshair entity, or block raycast 64)
+and view.png (downscaled to 1280 wide, written on the worker); Claude reads it only when needed. [[name:X]] renames
+the buddy (config.buddyName). Outside-game tests passed (looking-at, screenshot description, rename).
+
 ## Not yet verified in game
 - Recipe export on a real pack (count, speed, odd modded recipes), EMI screen opening from a chat button click,
   chat capture of advancement/mod messages. Test questions:
