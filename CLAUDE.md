@@ -33,3 +33,18 @@ Needs a JDK 17. If none is installed, the Minecraft launcher's bundled Java 17 r
 - claude.exe is looked up in: config `claudePath`, PATH, `~/.local/bin`, then the newest copy bundled with the
   Claude desktop app under `%LOCALAPPDATA%\Claude-Data\...\claude-code\<version>\` (that path changes on app updates).
 - `/compact` works in `-p` mode with `--resume` (tested: context about 17k -> 5k tokens, facts kept).
+
+## MUST DO (next session) - from in-game testing 2026-11-12
+Chat works in game, but Claude can't answer pack-specific questions:
+1. **Recipes.** It has no recipe data and guesses. Plan: on world join, export the client's RecipeManager
+   (the server sends all recipes, so pack/KubeJS changes are included) to text files in `craft-companion/recipes/`,
+   one per mod namespace. Also add recipes for the held item straight into the [Game: ...] context.
+   Give Claude read-only search over that folder (`--allowedTools Read Grep Glob`, cwd = craft-companion).
+2. **Web.** It runs with `--tools ""`, so no web search. Add config `allowWeb` (default true?) that enables
+   `WebSearch` and `WebFetch` for wiki and guide lookups. Note: uses more of the plan per message.
+3. Keep everything else blocked (no Bash, Edit or Write). Update README privacy section.
+
+Test questions (Prominence II), all should be answered correctly after the fix:
+- Hold a Create item, then: "What's the recipe for what I'm holding, and what can I make with it?"
+- "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
+- "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
