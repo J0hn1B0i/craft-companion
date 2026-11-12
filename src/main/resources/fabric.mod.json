@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "craftcompanion",
+  "version": "${version}",
+  "name": "Craft Companion",
+  "description": "Chat with Claude from Minecraft using /claude. Runs Claude Code on your own PC and knows your position, held item and mod list. Unofficial; not affiliated with Anthropic.",
+  "authors": ["J0hn1B0i"],
+  "contact": {
+    "sources": "https://github.com/J0hn1B0i/craft-companion",
+    "issues": "https://github.com/J0hn1B0i/craft-companion/issues"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.craftcompanion.CraftCompanionClient"] },
+  "depends": {
+    "fabricloader": ">=0.14.21",
+    "minecraft": "~1.20.1",
+    "fabric-api": "*",
+    "java": ">=17"
+  }
+}
