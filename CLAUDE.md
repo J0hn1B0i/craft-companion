@@ -9,8 +9,11 @@ process unless `allowApiKey` is true).
 - Minecraft 1.20.1, Fabric, yarn 1.20.1+build.10, Fabric API 0.92.x, Java 17.
 
 ## Files
-- `ClaudeRunner.java`: no Minecraft imports. Finds claude.exe, runs it on one worker thread,
-  keeps the session id, runs `/compact` every `compactEvery` messages. Testable with plain javac + gson.
+- `ClaudeRunner.java`: no Minecraft imports. Finds claude.exe, runs it (stream-json) on one worker thread,
+  keeps the session id, picks tools per mode (CHAT/EDIT/COMPACT), runs `/compact` every `compactEvery` messages.
+- `StagedEdits.java`: no Minecraft imports. staged/ -> apply with backups -> undo.
+- `RecipeExporter.java`: writes recipes/<namespace>.txt and items.txt from the client's recipe manager.
+- `EmiCompat.java`: only class touching EMI (compileOnly); loaded only when EMI is present.
 - `CraftCompanionClient.java`: client command (`/claude`, `status`, `compact`, `reset`), game-state line,
   mod list, chat output.
 - `DefaultClaudeMd.java`: default text for the in-game Claude's `CLAUDE.md`.
@@ -34,39 +37,17 @@ Needs a JDK 17. If none is installed, the Minecraft launcher's bundled Java 17 r
   Claude desktop app under `%LOCALAPPDATA%\Claude-Data\...\claude-code\<version>\` (that path changes on app updates).
 - `/compact` works in `-p` mode with `--resume` (tested: context about 17k -> 5k tokens, facts kept).
 
-## MUST DO (next session) - from in-game testing 2026-11-12
-Chat works in game, but Claude can't answer pack-specific questions:
-1. **Recipes.** It has no recipe data and guesses. Plan: on world join, export the client's RecipeManager
-   (the server sends all recipes, so pack/KubeJS changes are included) to text files in `craft-companion/recipes/`,
-   one per mod namespace. Also add recipes for the held item straight into the [Game: ...] context.
-   Give Claude read-only search over that folder (`--allowedTools Read Grep Glob`, cwd = craft-companion).
-2. **Web.** It runs with `--tools ""`, so no web search. Add config `allowWeb` (default true?) that enables
-   `WebSearch` and `WebFetch` for wiki and guide lookups. Note: uses more of the plan per message.
-3. **File edits (opt-in).** The player wants Claude to change parts of mods. Add config `allowEdits` (default false,
-   since this is a public mod). When on: run with cwd = game dir and allow only `Edit`/`Write` inside `config/`,
-   `defaultconfigs/`, `kubejs/` (if present) and the world's `datapacks/`. Never `mods/` jars: compiled code
-   can't be edited sensibly; changes go through configs, KubeJS scripts or datapacks instead.
-   Before any edit-enabled message, zip the allowed folders to `craft-companion/backups/`; add `/claude undo`
-   to restore the last backup. After a reply, list the changed files in chat and say whether `/reload` or a
-   restart is needed.
-4. **Item IDs in context.** In-game test sent "holding 1x Wrench", which is ambiguous with 470 mods.
-   Send the registry id and mod too (e.g. `create:wrench` from Create), for the held item and offhand.
-5. **Recent chat in context.** The player asked "what is that message that just popped up" and Claude couldn't
-   see it. Keep the last ~10 non-/claude chat lines (mixin or ChatHud access) and send them with each message.
-6. **Open the recipe in EMI.** Player asked "can it bring up the recipe?". Tell Claude (in CLAUDE.md) to end a
-   recipe answer with a marker like `[[recipe:create:wrench]]` or `[[uses:create:wrench]]`. The mod strips the
-   marker, shows a clickable "[Show recipe]" chat button, and opens EMI's recipe screen for that item
-   (EMI API, compileOnly soft dependency: verify `EmiApi.displayRecipes` / `displayUses` + `EmiStack.of` names
-   against EMI 1.1.x when building). Add `/claude recipe <item id>` too. If EMI is missing, skip the button.
-   JEI/REI support later.
-7. Keep everything else blocked (no Bash). Update README privacy section.
+## Done in 1.1.0 (from the 2026-11-12 in-game test)
+Recipe + item export on first message per world (RecipeExporter), item ids and recent chat in [Game] context,
+web search, `/claude edit` -> staged/ -> `/claude apply|discard|undo` (StagedEdits, backups/), EMI buttons via
+[[recipe:id]] / [[uses:id]] markers and `/claude recipe|uses <id>`. instructions.md is rewritten each launch;
+CLAUDE.md is migrated once (adds @instructions.md). Logo: docs/logo.png, icon in assets/craftcompanion/.
+Outside-game tests passed (recipes, chat, web, staged edit, apply, undo).
 
-In-game test results 2026-11-12 (transcript confirmed the [Game] line and mod list both reached Claude):
-Wrench recipe, Astral Tier III book, ME Controller: all "I don't know, check EMI". Web lookup: "I can't search".
-The player reports the ME Controller may not be craftable normally in this pack; check the recipe export.
-
-Test questions (Prominence II), all should be answered correctly after the fix:
-- Hold a Create item, then: "What's the recipe for what I'm holding, and what can I make with it?"
-- "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
-- "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
-- (allowEdits on) "Make the Xaero minimap show my coordinates" or another small config change, then `/claude undo`.
+## Not yet verified in game
+- Recipe export on a real pack (count, speed, odd modded recipes), EMI screen opening from a chat button click,
+  chat capture of advancement/mod messages. Test questions:
+  - Hold a Create item: "What's the recipe for what I'm holding, and what can I make with it?"
+  - "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
+  - "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
+  - `/claude edit make the minimap show my coordinates`, then Apply, then `/claude undo`.

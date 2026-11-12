@@ -2,13 +2,15 @@ package dev.craftcompanion;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -40,9 +42,13 @@ public final class ClaudeRunner {
         /** Run /compact after this many messages. 0 = never. */
         public int compactEvery = 20;
         /** Give up on a reply after this many seconds. */
-        public int timeoutSeconds = 120;
-        /** Add position, held item, health, biome etc. to each message. */
+        public int timeoutSeconds = 180;
+        /** Add position, held item, health, biome and recent chat to each message. */
         public boolean includeGameContext = true;
+        /** Let Claude search the web and read web pages (wikis, guides). */
+        public boolean allowWeb = true;
+        /** Allow /claude edit: Claude proposes config/datapack changes that you then apply. */
+        public boolean allowEdits = true;
         /**
          * false (default) = hide ANTHROPIC_API_KEY from Claude Code so it uses your signed-in
          * Claude plan. true = let Claude Code use the key (pay-per-use API billing).
@@ -57,10 +63,13 @@ public final class ClaudeRunner {
         int totalMessages;
     }
 
+    public enum Mode { CHAT, EDIT, COMPACT }
+
     public record Reply(boolean ok, String text) {}
 
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+    private final Path gameDir;
     private final Path chatDir;
     private final Path configFile;
     private final Path stateFile;
@@ -73,7 +82,8 @@ public final class ClaudeRunner {
         return t;
     });
 
-    public ClaudeRunner(Path chatDir, Path configFile) {
+    public ClaudeRunner(Path gameDir, Path chatDir, Path configFile) {
+        this.gameDir = gameDir;
         this.chatDir = chatDir;
         this.configFile = configFile;
         this.stateFile = chatDir.resolve("state.json");
@@ -81,14 +91,12 @@ public final class ClaudeRunner {
 
     public Config config() { return config; }
     public Path chatDir() { return chatDir; }
+    public ExecutorService worker() { return worker; }
 
     // ---------------------------------------------------------------- setup
 
-    /**
-     * @param defaultClaudeMd written to CLAUDE.md only if it doesn't exist yet
-     * @param modsMd          written to mods.md every time (null = leave alone)
-     */
-    public void load(String defaultClaudeMd, String modsMd) {
+    /** Loads config and state. Call once at startup. */
+    public void load() {
         try {
             Files.createDirectories(chatDir);
             if (Files.exists(configFile)) {
@@ -101,9 +109,6 @@ public final class ClaudeRunner {
                 State s = GSON.fromJson(Files.readString(stateFile), State.class);
                 if (s != null) state = s;
             }
-            Path claudeMd = chatDir.resolve("CLAUDE.md");
-            if (!Files.exists(claudeMd)) Files.writeString(claudeMd, defaultClaudeMd);
-            if (modsMd != null) Files.writeString(chatDir.resolve("mods.md"), modsMd);
         } catch (Exception e) {
             System.err.println("[craftcompanion] failed to load config: " + e);
         }
@@ -155,19 +160,22 @@ public final class ClaudeRunner {
 
     // ---------------------------------------------------------------- public API
 
-    /** Sends a message. Compacts afterwards in the background when due. */
-    public CompletableFuture<Reply> ask(String prompt, Consumer<String> notice) {
+    /**
+     * Sends a message. Compacts afterwards in the background when due.
+     * @param progress short status lines ("Searching recipes...") as Claude works
+     */
+    public CompletableFuture<Reply> ask(String prompt, Mode mode, Consumer<String> progress) {
         return CompletableFuture.supplyAsync(() -> {
-            Reply r = run(prompt, true);
+            Reply r = run(prompt, mode, progress, true);
             if (r.ok()) {
                 state.messagesSinceCompact++;
                 state.totalMessages++;
                 saveState();
                 if (config.compactEvery > 0 && state.messagesSinceCompact >= config.compactEvery) {
                     worker.submit(() -> {
-                        notice.accept("Compacting the conversation to save usage...");
+                        progress.accept("Compacting the conversation to save usage...");
                         Reply c = doCompact();
-                        notice.accept(c.ok() ? "Compacted." : "Compact failed: " + c.text());
+                        progress.accept(c.ok() ? "Compacted." : "Compact failed: " + c.text());
                     });
                 }
             }
@@ -191,6 +199,8 @@ public final class ClaudeRunner {
         String exe = findClaude();
         return "claude: " + (exe == null ? "NOT FOUND" : exe)
                 + " | model: " + config.model
+                + " | web: " + (config.allowWeb ? "on" : "off")
+                + " | edits: " + (config.allowEdits ? "on" : "off")
                 + " | messages since compact: " + state.messagesSinceCompact + "/" + config.compactEvery
                 + " | conversation: " + (state.sessionId == null ? "new" : state.sessionId.substring(0, 8));
     }
@@ -201,7 +211,7 @@ public final class ClaudeRunner {
 
     private Reply doCompact() {
         if (state.sessionId == null) return new Reply(true, "Nothing to compact yet.");
-        Reply r = run("/compact", false);
+        Reply r = run("/compact", Mode.COMPACT, s -> {}, false);
         if (r.ok()) {
             state.messagesSinceCompact = 0;
             saveState();
@@ -209,27 +219,63 @@ public final class ClaudeRunner {
         return r;
     }
 
-    private Reply run(String stdinText, boolean retryFresh) {
-        String exe = findClaude();
-        if (exe == null) {
-            return new Reply(false, "Claude Code not found. Set claudePath in config/craftcompanion.json.");
+    /** Game folders Claude may read (and, in edit mode, stage changes for). */
+    public List<Path> modFolders() {
+        List<Path> out = new ArrayList<>();
+        for (String name : StagedEdits.ROOTS) {
+            Path p = gameDir.resolve(name);
+            if (Files.isDirectory(p)) out.add(p.toAbsolutePath().normalize());
         }
+        return out;
+    }
+
+    private List<String> buildCommand(String exe, Mode mode) {
         List<String> cmd = new ArrayList<>();
         cmd.add(exe);
         cmd.add("-p");
         cmd.add("--model");
         cmd.add(config.model);
         cmd.add("--output-format");
-        cmd.add("json");
+        cmd.add("stream-json");
+        cmd.add("--verbose");
         cmd.add("--strict-mcp-config"); // don't load the user's MCP servers
         if (state.sessionId != null) {
             cmd.add("--resume");
             cmd.add(state.sessionId);
         }
-        cmd.add("--tools"); // no tools: chat only. Must stay last (it takes a list).
-        cmd.add("");
+        if (mode == Mode.COMPACT) {
+            cmd.add("--tools");
+            cmd.add("");
+            return cmd;
+        }
+        List<Path> dirs = modFolders();
+        if (!dirs.isEmpty()) {
+            cmd.add("--add-dir"); // read-only: writes there are never allowed
+            for (Path d : dirs) cmd.add(d.toString());
+        }
+        List<String> tools = new ArrayList<>(List.of("Read", "Grep", "Glob"));
+        List<String> allowed = new ArrayList<>(List.of("Read", "Grep", "Glob"));
+        if (config.allowWeb) {
+            tools.addAll(List.of("WebSearch", "WebFetch"));
+            allowed.addAll(List.of("WebSearch", "WebFetch"));
+        }
+        if (mode == Mode.EDIT) {
+            tools.addAll(List.of("Write", "Edit"));
+            allowed.addAll(List.of("Write(staged/**)", "Edit(staged/**)"));
+        }
+        cmd.add("--allowedTools");
+        cmd.add(String.join(",", allowed));
+        cmd.add("--tools");
+        cmd.add(String.join(",", tools));
+        return cmd;
+    }
 
-        ProcessBuilder pb = new ProcessBuilder(cmd);
+    private Reply run(String stdinText, Mode mode, Consumer<String> progress, boolean retryFresh) {
+        String exe = findClaude();
+        if (exe == null) {
+            return new Reply(false, "Claude Code not found. Set claudePath in config/craftcompanion.json.");
+        }
+        ProcessBuilder pb = new ProcessBuilder(buildCommand(exe, mode));
         pb.directory(chatDir.toFile());
         pb.redirectError(chatDir.resolve("last-error.log").toFile());
         Map<String, String> env = pb.environment();
@@ -241,7 +287,6 @@ public final class ClaudeRunner {
         } catch (IOException e) {
             return new Reply(false, "Could not start Claude Code: " + e.getMessage());
         }
-        CompletableFuture<String> out = CompletableFuture.supplyAsync(() -> readAll(proc.getInputStream()));
         try (OutputStream in = proc.getOutputStream()) {
             in.write(stdinText.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {
@@ -249,49 +294,112 @@ public final class ClaudeRunner {
             return new Reply(false, "Could not send message: " + e.getMessage());
         }
 
+        // Read the event stream as it arrives so we can show progress.
+        CompletableFuture<JsonObject> result = CompletableFuture.supplyAsync(() -> {
+            JsonObject last = null;
+            try (BufferedReader r = new BufferedReader(
+                    new InputStreamReader(proc.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    JsonObject ev = parseObject(line);
+                    if (ev == null) continue;
+                    String type = str(ev, "type");
+                    if ("result".equals(type)) last = ev;
+                    else if ("assistant".equals(type)) reportTools(ev, progress);
+                }
+            } catch (IOException ignored) {
+            }
+            return last;
+        });
+
         try {
             if (!proc.waitFor(config.timeoutSeconds, TimeUnit.SECONDS)) {
                 proc.destroyForcibly();
                 return new Reply(false, "Timed out after " + config.timeoutSeconds + "s.");
             }
-            String json = out.get(10, TimeUnit.SECONDS).trim();
-            return parse(json, stdinText, retryFresh);
+            JsonObject o = result.get(10, TimeUnit.SECONDS);
+            if (o == null) {
+                String err = readErrorLog();
+                String lower = err.toLowerCase();
+                // Probably a stale --resume id. Start a fresh conversation once.
+                if (retryFresh && state.sessionId != null
+                        && (lower.contains("session") || lower.contains("conversation"))) {
+                    state.sessionId = null;
+                    state.messagesSinceCompact = 0;
+                    saveState();
+                    return run(stdinText, mode, progress, false);
+                }
+                return new Reply(false, err.length() > 300 ? err.substring(0, 300) + "..." : err);
+            }
+            String sid = str(o, "session_id");
+            if (sid != null) {
+                state.sessionId = sid;
+                saveState();
+            }
+            boolean isError = o.has("is_error") && o.get("is_error").getAsBoolean();
+            String text = str(o, "result");
+            return new Reply(!isError, text == null ? "" : text);
         } catch (Exception e) {
             proc.destroyForcibly();
             return new Reply(false, "Error: " + e.getMessage());
         }
     }
 
-    private Reply parse(String json, String stdinText, boolean retryFresh) {
-        int start = json.indexOf('{');
-        JsonObject o = null;
-        if (start >= 0) {
-            try {
-                JsonElement el = JsonParser.parseString(json.substring(start));
-                if (el.isJsonObject()) o = el.getAsJsonObject();
-            } catch (Exception ignored) {
-            }
+    /** Turns tool calls into short status lines for the chat. */
+    private static void reportTools(JsonObject ev, Consumer<String> progress) {
+        JsonObject msg = ev.has("message") && ev.get("message").isJsonObject() ? ev.getAsJsonObject("message") : null;
+        if (msg == null || !msg.has("content") || !msg.get("content").isJsonArray()) return;
+        JsonArray content = msg.getAsJsonArray("content");
+        for (JsonElement el : content) {
+            if (!el.isJsonObject()) continue;
+            JsonObject b = el.getAsJsonObject();
+            if (!"tool_use".equals(str(b, "type"))) continue;
+            String name = str(b, "name");
+            JsonObject input = b.has("input") && b.get("input").isJsonObject() ? b.getAsJsonObject("input") : new JsonObject();
+            String line = switch (name == null ? "" : name) {
+                case "Grep", "Glob" -> {
+                    String p = String.valueOf(str(input, "path")) + String.valueOf(str(input, "pattern"));
+                    yield p.contains("recipes") ? "Searching recipes..." : p.contains("items") ? "Looking up items..." : "Searching files...";
+                }
+                case "Read" -> "Reading " + shortName(str(input, "file_path")) + "...";
+                case "WebSearch" -> "Searching the web: " + str(input, "query");
+                case "WebFetch" -> "Reading " + host(str(input, "url")) + "...";
+                case "Write", "Edit" -> "Preparing a change to " + shortName(str(input, "file_path")) + "...";
+                default -> null;
+            };
+            if (line != null) progress.accept(line);
         }
-        if (o == null) {
-            // Probably a stale --resume id. Start a fresh conversation once.
-            String err = readErrorLog().toLowerCase();
-            if (retryFresh && state.sessionId != null
-                    && (err.contains("session") || err.contains("conversation"))) {
-                state.sessionId = null;
-                state.messagesSinceCompact = 0;
-                saveState();
-                return run(stdinText, false);
-            }
-            String msg = json.isEmpty() ? readErrorLog() : json;
-            return new Reply(false, msg.length() > 300 ? msg.substring(0, 300) + "..." : msg);
+    }
+
+    private static String shortName(String path) {
+        if (path == null) return "a file";
+        String p = path.replace('\\', '/');
+        int i = p.lastIndexOf('/');
+        return i >= 0 ? p.substring(i + 1) : p;
+    }
+
+    private static String host(String url) {
+        if (url == null) return "a web page";
+        try {
+            return java.net.URI.create(url).getHost();
+        } catch (Exception e) {
+            return "a web page";
         }
-        if (o.has("session_id") && !o.get("session_id").isJsonNull()) {
-            state.sessionId = o.get("session_id").getAsString();
-            saveState();
+    }
+
+    private static JsonObject parseObject(String line) {
+        line = line.trim();
+        if (!line.startsWith("{")) return null;
+        try {
+            JsonElement el = JsonParser.parseString(line);
+            return el.isJsonObject() ? el.getAsJsonObject() : null;
+        } catch (Exception e) {
+            return null;
         }
-        boolean isError = o.has("is_error") && o.get("is_error").getAsBoolean();
-        String result = o.has("result") && !o.get("result").isJsonNull() ? o.get("result").getAsString() : "";
-        return new Reply(!isError, result);
+    }
+
+    private static String str(JsonObject o, String key) {
+        return o.has(key) && o.get(key).isJsonPrimitive() ? o.get(key).getAsString() : null;
     }
 
     private String readErrorLog() {
@@ -300,14 +408,6 @@ public final class ClaudeRunner {
             return s.isEmpty() ? "No reply from Claude Code." : s;
         } catch (IOException e) {
             return "No reply from Claude Code.";
-        }
-    }
-
-    private static String readAll(InputStream in) {
-        try (in) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            return "";
         }
     }
 }
