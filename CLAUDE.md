@@ -1,94 +1,43 @@
-# Craft Companion mod (source)
+# CLAUDE.md
 
-Client-side Fabric mod that adds `/claude <message>` to Minecraft chat. Each message runs
-Claude Code headlessly (`claude -p --model haiku --output-format json --strict-mcp-config --resume <id> --tools ""`)
-with the prompt on stdin, using the player's Claude plan (ANTHROPIC_API_KEY is hidden from the child
-process unless `allowApiKey` is true).
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Target
-- Minecraft 1.20.1, Fabric, yarn 1.20.1+build.10, Fabric API 0.92.x, Java 17.
+## What this is
+Craft Companion: a client-side Fabric mod for Minecraft 1.20.1. A buddy in the screen corner (key, default `\`) and a `/claude` command run **Claude Code headlessly on the player's PC** and bring its answers back into the game. Features, commands and the settings table are in `README.md`; the source of truth for settings is `ClaudeRunner.Config`. Versions (Fabric Loader 0.15.11, Fabric API 0.92.2, yarn 1.20.1+build.10, EMI API) are in `gradle.properties`; Java 17. EMI is a `modCompileOnly` soft dependency.
 
-## Files
-- `ClaudeRunner.java`: no Minecraft imports. Finds claude.exe, runs it (stream-json) on one worker thread,
-  keeps the session id, picks tools per mode (CHAT/EDIT/COMPACT), runs `/compact` every `compactEvery` messages.
-- `StagedEdits.java`: no Minecraft imports. staged/ -> apply with backups -> undo.
-- `RecipeExporter.java`: writes recipes/<namespace>.txt and items.txt from the client's recipe manager.
-- `EmiCompat.java`: only class touching EMI (compileOnly); loaded only when EMI is present.
-- `CraftCompanionClient.java`: client command (`/claude`, `status`, `compact`, `reset`), game-state line,
-  mod list, chat output.
-- `DefaultClaudeMd.java`: default text for the in-game Claude's `CLAUDE.md`.
+This repo lives inside a CurseForge instance (Prominence II: Hasturian Era, ~470 mods). The instance folder is the parent directory and is **not** a git repo; the mod's runtime files (`../craft-companion/`, `../config/craftcompanion.json`) sit there too, outside this repo.
 
-## Runtime files (in the game/instance folder)
-- `config/craftcompanion.json`: claudePath, model, compactEvery, timeoutSeconds, includeGameContext, allowApiKey.
-- `craft-companion/CLAUDE.md`: the in-game Claude's lasting context. Created once, never overwritten.
-- `craft-companion/mods.md`: installed mod list, rewritten every launch, imported by CLAUDE.md with `@mods.md`.
-- `craft-companion/state.json`: session id and counters. `craft-companion/last-error.log`: stderr of the last run.
-
-## Build
-Needs a JDK 17. If none is installed, the Minecraft launcher's bundled Java 17 runtime
-(`java-runtime-gamma`) usually includes javac; point JAVA_HOME at it.
+## Commands
 ```bash
-./gradlew build      # jar in build/libs/
+export JAVA_HOME="/c/Users/Johns/curseforge/minecraft/Install/runtime/java-runtime-gamma/windows-x64/java-runtime-gamma"  # no system JDK 17
+./gradlew build                                  # jar -> build/libs/craft-companion-<mod_version>.jar (first build downloads Minecraft and mappings)
+rm ../mods/craft-companion-*.jar && cp build/libs/craft-companion-<version>.jar ../mods/   # only one jar of this mod may be present
+./gradlew --stop                                 # the Gradle daemon idles at ~600 MB
 ```
+- Installing fails with "Device or resource busy" while Minecraft is running (Windows locks the jar). Close the game; never leave two versions in `mods/` (same mod id crashes the game).
+- There is no test suite and no dev run configuration. Check changes by launching the instance from CurseForge.
+- Classes without Minecraft imports (`ClaudeRunner`, `StagedEdits`, `DefaultClaudeMd`, plus `ProcessPriority`/`Kernel32Ex` which need the JNA jars) can be exercised outside the game: compile them with plain `javac` against `gson-2.10.jar`, `jna-5*.jar` and `jna-platform-5*.jar` from `~/.gradle/caches`, plus a throwaway `main` in package `dev.craftcompanion` (the helpers are package-private). Point it at a fake game dir containing `craft-companion/recipes/*.txt`, `items.txt` and `config/`, write `instructions.md` with `DefaultClaudeMd.instructions(cfg, true, "EMI", "Sprout")`, then call `ClaudeRunner.ask(...)`. This is how replies, staged edits, apply/undo and priority lowering have been verified.
+- To see exactly what the in-game Claude received, read its transcript: `~/.claude/projects/<instance path with every non-alphanumeric character replaced by ->-craft-companion/<sessionId>.jsonl` (session id is in `../craft-companion/state.json`).
 
-## Notes
-- `--tools` takes a list, so it must stay the last flag.
-- claude.exe is looked up in: config `claudePath`, PATH, `~/.local/bin`, then the newest copy bundled with the
-  Claude desktop app under `%LOCALAPPDATA%\Claude-Data\...\claude-code\<version>\` (that path changes on app updates).
-- `/compact` works in `-p` mode with `--resume` (tested: context about 17k -> 5k tokens, facts kept).
+## Architecture
+Three channels connect the game and Claude. Reading `CraftCompanionClient` alone doesn't show them.
 
-## Done in 1.1.0 (from the 2026-11-12 in-game test)
-Recipe + item export on first message per world (RecipeExporter), item ids and recent chat in [Game] context,
-web search, `/claude edit` -> staged/ -> `/claude apply|discard|undo` (StagedEdits, backups/), EMI buttons via
-[[recipe:id]] / [[uses:id]] markers and `/claude recipe|uses <id>`. instructions.md is rewritten each launch;
-CLAUDE.md is migrated once (adds @instructions.md). Logo: docs/logo.png, icon in assets/craftcompanion/.
-Outside-game tests passed (recipes, chat, web, staged edit, apply, undo).
+**1. Player to Claude (prompt).** `CraftCompanionClient.send` assembles one text prompt: `[Since your last reply: ...]` (outcomes of the player's y/n answers) + `[Game: ...]` (position, biome, held items with registry ids, health) + `[Looking at: ...]` (crosshair entity, or block raycast to 64) + a pointer to `view.png` (screenshot taken when the panel opens or a `/claude` message is sent) + `[Chat Ns ago]` lines (ring buffer fed by `ClientReceiveMessageEvents`) + the message. `ClaudeRunner.ask` runs it on a single worker thread as `claude -p --model haiku --output-format stream-json --verbose --strict-mcp-config [--resume <id>] --add-dir <config folders> --allowedTools ... --tools ...` with the prompt on **stdin** and cwd `craft-companion/`. It reads the event stream for progress lines ("Searching recipes...") and the final result, stores the session id in `state.json`, and runs `/compact` in `Mode.COMPACT` every `compactEvery` messages. `ANTHROPIC_API_KEY` is removed from the child env unless `allowApiKey`, so the signed-in plan is used. The child is set to below-normal CPU priority through JNA.
 
-## 1.2.0: natural language + Y/N
-No commands needed: every /claude message may stage edits (allowEdits), emit [[recipe:id]] / [[uses:id]] / [[undo]].
-The client turns those into a queue of Y/N questions (plain y/n typed in chat is intercepted with
-ClientSendMessageEvents.ALLOW_CHAT while a question is open, 5 min expiry; [Yes]/[No] buttons run /claude y|n).
-Outcomes of answers are prepended to the next prompt as [Since your last reply: ...] so Claude knows what was applied.
-Claude may Edit(CLAUDE.md) itself to save "remember ..." notes. Old commands (edit/apply/discard/undo/recipe/uses)
-still work but are no longer advertised. Outside-game tests passed for all of this.
+**2. Claude's context (files in cwd `craft-companion/`).** Claude Code loads `CLAUDE.md` there. It is created once and never overwritten (the player and Claude, via `Edit(CLAUDE.md)`, add notes); it imports `@instructions.md` (rewritten every launch by `DefaultClaudeMd.instructions` from the config flags) and `@mods.md` (mod list). `RecipeExporter` fills `recipes/<namespace>.txt` and `items.txt` from the client's `RecipeManager` (the server sends all recipes, so pack and datapack changes are included); Claude finds recipes by Grep. The export runs in 4 ms slices per tick, and a message waits (`askWhenReady`) until it is done.
 
-## 1.3.0: corner buddy
-BuddyHud (HudRenderCallback, icon.png 32px, bob/blink, "..."/"!" bubble) shows when summoned, busy or asking.
-Key `key.craftcompanion.talk` (default backslash; the dev's own pack uses L) captures view.png then opens BuddyScreen:
-a non-pausing panel with history (log), input, Yes/No buttons, Hide. Replies go to the panel when the request
-came from it (panelMode), otherwise to chat. Context adds [Looking at: ...] (crosshair entity, or block raycast 64)
-and view.png (downscaled to 1280 wide, written on the worker); Claude reads it only when needed. [[name:X]] renames
-the buddy (config.buddyName). Outside-game tests passed (looking-at, screenshot description, rename).
+**3. Claude to the game (markers and staged files).** The reply text may contain `[[recipe:<id>]]`, `[[uses:<id>]]`, `[[undo]]`, `[[name:<x>]]`; `postReply` parses and strips them. Edits are never made directly: Claude may only `Write` under `staged/**`; `StagedEdits.pending()` lists those files (whitelisted roots `config`, `defaultconfigs`, `kubejs`, `datapacks`, no `..`). Each marker or staged set becomes a `Question` in a y/n queue. The player answers with a typed `y`/`n` (swallowed by `ClientSendMessageEvents.ALLOW_CHAT` while a question is open), the panel, or `[Yes]/[No]` chat buttons (`/claude y|n`). `apply` backs up originals to `backups/<time>/` (new files are listed in `_new_files.txt` so `undo` can delete them). EMI opens only through `EmiCompat`, the one class that touches EMI classes (guarded by the `emi` flag).
 
-## Not yet verified in game
-- Recipe export on a real pack (count, speed, odd modded recipes), EMI screen opening from a chat button click,
-  chat capture of advancement/mod messages. Test questions:
-  - Hold a Create item: "What's the recipe for what I'm holding, and what can I make with it?"
-  - "How do I craft an ME Controller in this pack? Is it different from normal AE2?"
-  - "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
-  - `/claude edit make the minimap show my coordinates`, then Apply, then `/claude undo`.
+**Threading and output.** All game and UI state (`log`, `questions`, `outcomes`, `delayed`, `busy`) is client-thread only; the worker thread and file writes hand back via `MinecraftClient.execute`. `later(ticks, task)` defers work to the tick handler (used so a screen or screenshot happens after the chat screen closes). `panelMode` decides whether `say()` writes to game chat or only to the panel history (`log`, with `logVersion` so `BuddyScreen` re-wraps only on change). Replies go through `cleanMarkdown`/`flattenTables` because Minecraft chat can't render markdown.
 
-## 1.3.1 (done 2026-11-13): smaller panel, draggable buddy, lag fixes
-- Panel is 210x140 (was 300x230). Drag the buddy while the panel is open; position saved as fractions in config
-  (buddyX/buddyY, -1 = bottom-right) and the panel re-places itself above/below the buddy.
-- Lag suspects fixed: RecipeExporter now works in 4 ms slices per tick (was one 31k-recipe freeze) and re-counts recipes
-  at most every 30 s (was values() on every message); messages wait for the index to finish; tick handler no longer
-  copies a list every tick; panel caches wrapped history (logVersion); claude.exe path cached (was walking folders every
-  message); Claude Code runs at BelowNormal CPU priority (ProcessPriority + Kernel32Ex via JNA, verified).
-- Not measured in game: a profiler (spark is installed in the pack: /spark profiler) is the way to confirm.
-- Tables in replies are flattened (cleanMarkdown/flattenTables); Sprout told not to name files.
-- Pack review (read-only, nothing changed): see the report given to the player. Highlights: perf mods already
-  present (Sodium, Lithium, FerriteCore, ModernFix, EntityCulling, ImmediatelyFast, spark); Xmx8192m with Xms256m on a
-  31.7 GB PC; 177 resource packs active, ~150 are PT-BR/Spanish/HTP translation packs; Complementary+Euphoria shaders,
-  Fresh Animations + EMF/ETF are the heavy visual parts; render/sim distance 10.
+## Gotchas
+- Claude Code loads `CLAUDE.md` from every parent directory of its cwd. Never put a `CLAUDE.md` (or other Claude Code instructions) in the instance root or any parent of `craft-companion/`: it would be injected into every in-game message. This file sits in a sibling folder, so it isn't loaded.
+- `--allowedTools` and `--tools` take lists; they are passed as single comma-joined arguments and kept last. Compact mode uses `--tools ""`.
+- `/compact` works in `-p` mode with `--resume` (about 17k to 5k tokens in testing, facts kept).
+- claude.exe is found via config `claudePath`, PATH, `~/.local/bin`, then the newest copy bundled with the Claude desktop app under `%LOCALAPPDATA%\Claude-Data\...\claude-code\<version>\` (the path changes when the app updates; the result is cached while the file exists).
+- Yarn 1.20.1 signatures differ from newer Minecraft (for example `Screen.mouseScrolled` takes three arguments).
+- Don't edit `options.txt` or `minecraftinstance.json` while the game or the CurseForge app is running; they overwrite changes. Back up first (see `../craft-companion/backup-pack-tuning/`). On this instance the talk key is bound to `L` in `options.txt`.
+- Releases are published by the owner on GitHub (`gh release create v<version> build/libs/craft-companion-<version>.jar`); the remote is `J0hn1B0i/craft-companion`, branch `main`.
 
-## Pack tuning applied 2026-11-13 (player said yes)
-- options.txt: resourcePacks 177 -> 58 (removed the 119 Spanish/PT-BR/HTP translation packs; files stay in resourcepacks/).
-- minecraftinstance.json: isMemoryOverride true, allocatedMemory 12288 (was 0 = launcher default, -Xmx8192m).
-- Backups: craft-companion/backup-pack-tuning/{options.txt,minecraftinstance.json}. Xms (256m) left alone: setting
-  javaArgsOverride could replace CurseForge's default JVM flags.
-- To verify next time: logs/latest.log should show -Xmx12288m; resource reload list should be shorter.
-
-## NEXT TIME
-- Verify in game: panel size and dragging, tables flattened, recipe index slicing (no hitch), EMI button, y/n typing.
-- If lag persists: run /spark profiler start, play a minute, /spark profiler stop, and read the report.
+## Status (v1.3.1)
+Built, installed and pushed, but only exercised outside the game. Still to check in game: panel size and dragging, recipe export on the full pack (no hitch, correct count), EMI opening from a button, `y`/`n` typed in chat, chat capture of advancement messages. Lag was investigated by code review only; to confirm, use the pack's spark mod (`/spark profiler start`, play, `/spark profiler stop`). Pack tuning already applied on the dev instance: `allocatedMemory` 12288 and 119 Spanish/Portuguese translation packs removed from the active resource pack list (files kept).
