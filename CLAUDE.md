@@ -82,6 +82,13 @@ the buddy (config.buddyName). Outside-game tests passed (looking-at, screenshot 
   31.7 GB PC; 177 resource packs active, ~150 are PT-BR/Spanish/HTP translation packs; Complementary+Euphoria shaders,
   Fresh Animations + EMF/ETF are the heavy visual parts; render/sim distance 10.
 
+## Pack tuning applied 2026-11-13 (player said yes)
+- options.txt: resourcePacks 177 -> 58 (removed the 119 Spanish/PT-BR/HTP translation packs; files stay in resourcepacks/).
+- minecraftinstance.json: isMemoryOverride true, allocatedMemory 12288 (was 0 = launcher default, -Xmx8192m).
+- Backups: craft-companion/backup-pack-tuning/{options.txt,minecraftinstance.json}. Xms (256m) left alone: setting
+  javaArgsOverride could replace CurseForge's default JVM flags.
+- To verify next time: logs/latest.log should show -Xmx12288m; resource reload list should be shorter.
+
 ## NEXT TIME
 - Verify in game: panel size and dragging, tables flattened, recipe index slicing (no hitch), EMI button, y/n typing.
 - If lag persists: run /spark profiler start, play a minute, /spark profiler stop, and read the report.
