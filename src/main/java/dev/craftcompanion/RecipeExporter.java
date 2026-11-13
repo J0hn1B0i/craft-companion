@@ -15,72 +15,149 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 /**
  * Writes the recipes the client received from the server, plus an item name index, to text files
- * Claude can search. Must be called on the client thread; file writing happens on the given executor.
+ * Claude can search.
+ *
+ * A big pack has 30,000+ recipes, so the work is done in small slices (a few milliseconds per tick)
+ * instead of one long freeze. Everything here runs on the client thread except the file writes.
  */
 final class RecipeExporter {
     private RecipeExporter() {}
 
-    private static Object lastSource;
-    private static int lastCount = -1;
-    private static boolean itemsWritten;
+    private static final long BUDGET_NANOS = 4_000_000L; // 4 ms of work per tick
+    private static final long RECHECK_MS = 30_000;       // don't re-count recipes more than this often
+
     private static final Map<String, String> MOD_NAMES = new HashMap<>();
 
-    /** Exports if the world or its recipe list changed since last time. Returns a notice or null. */
-    static String exportIfNeeded(MinecraftClient mc, Path chatDir, Executor io) {
-        if (mc.getNetworkHandler() == null || mc.world == null) return null;
-        Collection<Recipe<?>> recipes = mc.getNetworkHandler().getRecipeManager().values();
+    // What we last exported
+    private static Object lastSource;
+    private static int lastCount = -1;
+    private static long lastCheck;
+    private static boolean itemsWritten;
+
+    // The running job (null when idle)
+    private static List<Recipe<?>> jobRecipes;
+    private static int jobIndex;
+    private static Map<String, StringBuilder> jobByNamespace;
+    private static int jobOk;
+    private static List<Item> jobItems;
+    private static int jobItemIndex;
+    private static StringBuilder jobItemsOut;
+    private static DynamicRegistryManager jobRegs;
+    private static Path jobDir;
+    private static Executor jobIo;
+    private static Consumer<String> jobDone;
+
+    static boolean busy() {
+        return jobRecipes != null;
+    }
+
+    /**
+     * Starts an export if the world or its recipes changed. Returns true if one was started.
+     * onDone gets a short notice on the client thread when it finishes.
+     */
+    static boolean startIfNeeded(MinecraftClient mc, Path chatDir, Executor io, Consumer<String> onDone) {
+        if (busy() || mc.getNetworkHandler() == null || mc.world == null) return false;
         Object source = mc.getNetworkHandler();
-        if (source == lastSource && recipes.size() == lastCount && itemsWritten) return null;
+        long now = System.currentTimeMillis();
+        boolean sameWorld = source == lastSource && itemsWritten;
+        if (sameWorld && now - lastCheck < RECHECK_MS) return false;
+        lastCheck = now;
+
+        List<Recipe<?>> recipes = new ArrayList<>(mc.getNetworkHandler().getRecipeManager().values());
+        if (sameWorld && recipes.size() == lastCount) return false;
         lastSource = source;
         lastCount = recipes.size();
 
-        DynamicRegistryManager regs = mc.world.getRegistryManager();
-        Map<String, StringBuilder> byNamespace = new TreeMap<>();
-        int ok = 0;
-        for (Recipe<?> r : recipes) {
+        jobRecipes = recipes;
+        jobIndex = 0;
+        jobOk = 0;
+        jobByNamespace = new TreeMap<>();
+        jobRegs = mc.world.getRegistryManager();
+        jobDir = chatDir;
+        jobIo = io;
+        jobDone = onDone;
+        if (itemsWritten) {
+            jobItems = null;
+        } else {
+            jobItems = new ArrayList<>();
+            Registries.ITEM.forEach(jobItems::add);
+            jobItemIndex = 0;
+            jobItemsOut = new StringBuilder();
+        }
+        return true;
+    }
+
+    /** Call once per client tick. */
+    static void tick() {
+        if (jobRecipes == null) return;
+        long end = System.nanoTime() + BUDGET_NANOS;
+        while (jobIndex < jobRecipes.size() && System.nanoTime() < end) {
+            Recipe<?> r = jobRecipes.get(jobIndex++);
             try {
-                String line = describe(r, regs);
+                String line = describe(r, jobRegs);
                 String ns = line.substring(0, line.indexOf(':'));
                 if (!ns.matches("[a-z0-9_.-]+")) ns = "_other";
-                byNamespace.computeIfAbsent(ns, k -> new StringBuilder()).append(line).append('\n');
-                ok++;
+                jobByNamespace.computeIfAbsent(ns, k -> new StringBuilder()).append(line).append('\n');
+                jobOk++;
             } catch (Throwable ignored) {
                 // Some modded recipes can't be described from the client. Skip them.
             }
         }
-        String items = itemsWritten ? null : itemIndex();
-        itemsWritten = true;
-        int count = ok;
-
-        io.execute(() -> {
+        if (jobIndex < jobRecipes.size()) return;
+        while (jobItems != null && jobItemIndex < jobItems.size() && System.nanoTime() < end) {
+            Item item = jobItems.get(jobItemIndex++);
             try {
-                Path dir = chatDir.resolve("recipes");
-                if (Files.isDirectory(dir)) {
-                    try (Stream<Path> s = Files.list(dir)) {
+                Identifier id = Registries.ITEM.getId(item);
+                jobItemsOut.append(id).append(" | ").append(new ItemStack(item).getName().getString())
+                        .append(" | ").append(modName(id.getNamespace())).append('\n');
+            } catch (Throwable ignored) {
+            }
+        }
+        if (jobItems != null && jobItemIndex < jobItems.size()) return;
+        finish();
+    }
+
+    private static void finish() {
+        Map<String, StringBuilder> byNamespace = jobByNamespace;
+        String items = jobItems == null ? null : jobItemsOut.toString();
+        int count = jobOk;
+        Path dir = jobDir;
+        Consumer<String> done = jobDone;
+        jobIo.execute(() -> {
+            try {
+                Path rdir = dir.resolve("recipes");
+                if (Files.isDirectory(rdir)) {
+                    try (Stream<Path> s = Files.list(rdir)) {
                         for (Path p : (Iterable<Path>) s::iterator) Files.deleteIfExists(p);
                     }
                 }
-                Files.createDirectories(dir);
+                Files.createDirectories(rdir);
                 for (Map.Entry<String, StringBuilder> e : byNamespace.entrySet()) {
-                    Files.writeString(dir.resolve(e.getKey() + ".txt"), e.getValue());
+                    Files.writeString(rdir.resolve(e.getKey() + ".txt"), e.getValue());
                 }
-                if (items != null) Files.writeString(chatDir.resolve("items.txt"), items);
+                if (items != null) Files.writeString(dir.resolve("items.txt"), items);
             } catch (IOException e) {
                 System.err.println("[craftcompanion] recipe export failed: " + e);
             }
         });
-        return "Indexed " + count + " recipes for Claude.";
+        if (items != null) itemsWritten = true;
+        jobRecipes = null;
+        jobByNamespace = null;
+        jobItems = null;
+        jobItemsOut = null;
+        jobRegs = null;
+        if (done != null) done.accept("Indexed " + count + " recipes for Claude.");
     }
 
     private static String describe(Recipe<?> r, DynamicRegistryManager regs) {
@@ -141,19 +218,6 @@ final class RecipeExporter {
             sb.append(id(stacks[i].getItem()));
         }
         if (stacks.length > n) sb.append(" (+").append(stacks.length - n).append(" more)");
-        return sb.toString();
-    }
-
-    private static String itemIndex() {
-        StringBuilder sb = new StringBuilder();
-        for (Item item : Registries.ITEM) {
-            try {
-                Identifier id = Registries.ITEM.getId(item);
-                sb.append(id).append(" | ").append(new ItemStack(item).getName().getString())
-                        .append(" | ").append(modName(id.getNamespace())).append('\n');
-            } catch (Throwable ignored) {
-            }
-        }
         return sb.toString();
     }
 

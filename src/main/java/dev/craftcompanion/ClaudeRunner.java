@@ -60,6 +60,9 @@ public final class ClaudeRunner {
         public boolean allowScreenshots = true;
         /** Keep the buddy in the corner all the time, not only when summoned or busy. */
         public boolean buddyAlwaysVisible = false;
+        /** Where the buddy sits, as a fraction (0 to 1) of the free screen area. -1 = default bottom-right corner. */
+        public double buddyX = -1;
+        public double buddyY = -1;
     }
 
     /** Saved to craft-companion/state.json. */
@@ -138,6 +141,14 @@ public final class ClaudeRunner {
 
     /** Finds claude.exe: config, then PATH, then ~/.local/bin, then the desktop app's bundled copy. */
     public String findClaude() {
+        if (cachedClaude != null && new File(cachedClaude).isFile()) return cachedClaude;
+        cachedClaude = searchClaude(); // walks folders, so only when the remembered path is gone
+        return cachedClaude;
+    }
+
+    private String cachedClaude;
+
+    private String searchClaude() {
         if (config.claudePath != null && !config.claudePath.isBlank()
                 && new File(config.claudePath).isFile()) {
             return config.claudePath;
@@ -302,6 +313,7 @@ public final class ClaudeRunner {
         } catch (IOException e) {
             return new Reply(false, "Could not start Claude Code: " + e.getMessage());
         }
+        ProcessPriority.lower(proc); // keep Claude Code from competing with the game for CPU
         try (OutputStream in = proc.getOutputStream()) {
             in.write(stdinText.getBytes(StandardCharsets.UTF_8));
         } catch (IOException e) {

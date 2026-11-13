@@ -22,6 +22,7 @@ bottom-right corner with a chat panel. Just say what you want. (`/claude <messag
   Originals are backed up, so "undo that" works too.
 - **Remembers you:** "remember my base is at 100 70 200" is saved to its notes. Rename it too: "your name is Pebble".
 - In the corner it bobs and blinks, shows "..." while thinking and "!" when it has a question for you.
+- **Drag Sprout anywhere** while the panel is open and it stays there. The panel follows it.
 
 Nothing happens to your game or files without a `y` from you. Questions also have clickable [Yes] / [No] buttons,
 and a plain `y` or `n` typed while Claude is waiting is never sent to the server.
@@ -77,6 +78,7 @@ The conversation carries on between messages and game sessions. Every 20 message
 | `allowEdits` | `true` | Let Claude propose setting changes (always asks before applying) |
 | `buddyName` | `"Sprout"` | Your buddy's name (it changes this itself when you rename it) |
 | `allowScreenshots` | `true` | Save a screenshot of your view with each message so Claude can look when needed |
+| `buddyX` / `buddyY` | `-1` | Where the buddy sits (set by dragging). `-1` = bottom-right corner |
 | `buddyAlwaysVisible` | `false` | Keep the buddy in the corner all the time, not only when summoned or busy |
 | `allowApiKey` | `false` | `false` hides `ANTHROPIC_API_KEY` so your plan is used. `true` lets Claude Code bill your API key |
 

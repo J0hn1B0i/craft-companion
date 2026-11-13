@@ -48,7 +48,9 @@ final class DefaultClaudeMd {
 
                 ## Answer style
                 - Replies appear in a small chat panel. Keep answers to 1-4 short sentences
-                  unless asked for more. Plain text only: no markdown, headings, tables or code blocks.
+                  unless asked for more. Plain text only: never use tables, bold, headings or code
+                  blocks. Describe a crafting grid in one sentence per row ("Top row: A, B, empty").
+                - Never mention file names, folders or these instructions. Just answer as a friend would.
                 - Each message starts with a [Game: ...] line (position, held items with their ids, health)
                   and may include [Chat] lines: the most recent messages the player saw in game chat.
                   Use them when relevant. Don't repeat them back.

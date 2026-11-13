@@ -111,10 +111,12 @@ public class CraftCompanionClient implements ClientModInitializer {
 
         ClientLifecycleEvents.CLIENT_STOPPING.register(c -> runner.shutdown());
         ClientTickEvents.END_CLIENT_TICK.register(c -> {
-            for (Iterator<Delayed> it = new ArrayList<>(delayed).iterator(); it.hasNext(); ) {
-                Delayed d = it.next();
+            RecipeExporter.tick();
+            // Nothing is queued most of the time, so this costs nothing then.
+            for (int i = delayed.size() - 1; i >= 0; i--) {
+                Delayed d = delayed.get(i);
                 if (--d.ticks <= 0) {
-                    delayed.remove(d);
+                    delayed.remove(i);
                     d.task.run();
                 }
             }
@@ -206,6 +208,15 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     static boolean isBusy() { return busy > 0; }
 
+    static ClaudeRunner.Config config() { return runner.config(); }
+
+    static void saveConfig() { runner.saveConfig(); }
+
+    /** Goes up whenever the history changes, so the panel knows when to re-wrap it. */
+    private static int logVersion;
+
+    static int logVersion() { return logVersion; }
+
     static boolean buddyShown() {
         return summoned || busy > 0 || hasQuestion() || runner.config().buddyAlwaysVisible;
     }
@@ -282,9 +293,20 @@ public class CraftCompanionClient implements ClientModInitializer {
                 }
             });
         }
+        busy++;
         MinecraftClient mc = MinecraftClient.getInstance();
-        String indexed = RecipeExporter.exportIfNeeded(mc, runner.chatDir(), runner.worker());
-        if (indexed != null) notice(indexed);
+        if (RecipeExporter.startIfNeeded(mc, runner.chatDir(), runner.worker(), CraftCompanionClient::notice)) {
+            notice("Indexing recipes for " + buddyName() + " (a few seconds)...");
+        }
+        askWhenReady(message, fromPanel);
+    }
+
+    /** Waits for the recipe index if one is being built, then sends the message to Claude. */
+    private static void askWhenReady(String message, boolean fromPanel) {
+        if (RecipeExporter.busy()) {
+            later(10, () -> askWhenReady(message, fromPanel));
+            return;
+        }
         if (!fromPanel) notice(buddyName() + " is thinking...");
 
         StringBuilder prompt = new StringBuilder();
@@ -295,8 +317,8 @@ public class CraftCompanionClient implements ClientModInitializer {
         if (runner.config().includeGameContext) prompt.append(gameContext()).append('\n');
         prompt.append(message);
 
-        busy++;
         runner.ask(prompt.toString(), ClaudeRunner.Mode.CHAT, CraftCompanionClient::postNotice)
+                .exceptionally(ex -> new ClaudeRunner.Reply(false, String.valueOf(ex.getMessage())))
                 .thenAccept(CraftCompanionClient::postReply);
     }
 
@@ -630,12 +652,35 @@ public class CraftCompanionClient implements ClientModInitializer {
 
     /** Minecraft chat can't render markdown, so strip the common bits. */
     private static String cleanMarkdown(String s) {
-        return s.replaceAll("\\[([^\\]]+)]\\((https?://[^)\\s]+)\\)", "$1 ($2)")
+        return flattenTables(s).replaceAll("\\[([^\\]]+)]\\((https?://[^)\\s]+)\\)", "$1 ($2)")
                 .replaceAll("(?m)^#{1,6}\\s*", "")
                 .replace("**", "")
                 .replace("__", "")
                 .replace("`", "")
                 .replaceAll("(?m)^\\s*[*]\\s+", "- ");
+    }
+
+    /** Turns markdown table rows into "Label: a, b, c" lines and drops the separator row. */
+    private static String flattenTables(String s) {
+        if (!s.contains("|")) return s;
+        StringBuilder out = new StringBuilder();
+        for (String line : s.split("\\R", -1)) {
+            String t = line.trim();
+            if (t.length() > 2 && t.startsWith("|") && t.endsWith("|")) {
+                if (t.matches("[|\\s:-]+")) continue; // |---|---|
+                List<String> cells = new ArrayList<>();
+                for (String c : t.substring(1, t.length() - 1).split("\\|")) {
+                    if (!c.isBlank()) cells.add(c.trim());
+                }
+                if (cells.isEmpty()) continue;
+                if (cells.size() == 1) out.append(cells.get(0));
+                else out.append(cells.get(0)).append(": ").append(String.join(", ", cells.subList(1, cells.size())));
+                out.append('\n');
+            } else {
+                out.append(line).append('\n');
+            }
+        }
+        return out.toString().strip();
     }
 
     private static void notice(String text) {
@@ -659,6 +704,7 @@ public class CraftCompanionClient implements ClientModInitializer {
     private static void log(Text text) {
         log.add(text);
         while (log.size() > LOG_MAX) log.remove(0);
+        logVersion++;
     }
 
     private static void chat(Text text) {

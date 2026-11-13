@@ -68,17 +68,20 @@ the buddy (config.buddyName). Outside-game tests passed (looking-at, screenshot 
   - "Look up online: what is the first boss in Prominence II Hasturian Era and how do I prepare for it?"
   - `/claude edit make the minimap show my coordinates`, then Apply, then `/claude undo`.
 
-## NEXT TIME (player feedback after 1.3.0, 2026-11-12)
-1. **Panel text box too big.** Shrink BuddyScreen (pw max 300 / ph max 230 is too large); maybe ~200x150, smaller input.
-2. **Game feels a bit laggier than before.** Investigate. Suspects to measure first:
-   - END_CLIENT_TICK handler copies the `delayed` list every tick (allocation each tick); only copy when non-empty.
-   - BuddyHud draws every frame even when hidden? (returns early, but check) and wraps nothing heavy; BuddyScreen
-     re-wraps the whole log every frame: cache wrapped lines until the log changes.
-   - captureView() on the client thread (resizeSubRectTo on a full frame) when opening the panel / sending.
-   - RecipeExporter first-message hitch (~31k recipes + 22k item names on the client thread).
-   - findClaude() walks %LOCALAPPDATA%\Claude-Data on every message (worker thread, but disk I/O): cache the path.
-   Compare with the mod removed to confirm it's the mod at all (spark profiler is a good tool if the pack has it).
-3. **Optimize the modpack generally** (separate from the mod): check performance mods present/missing
-   (Sodium/Embeddium-equivalent, ModernFix, FerriteCore, Entity Culling, ImmediatelyFast, etc.), JVM args and
-   RAM allocation in minecraftinstance.json / CurseForge settings, render/simulation distance in options.txt,
-   shaders, and heavy mods. Report suggestions; change nothing without asking.
+## 1.3.1 (done 2026-11-13): smaller panel, draggable buddy, lag fixes
+- Panel is 210x140 (was 300x230). Drag the buddy while the panel is open; position saved as fractions in config
+  (buddyX/buddyY, -1 = bottom-right) and the panel re-places itself above/below the buddy.
+- Lag suspects fixed: RecipeExporter now works in 4 ms slices per tick (was one 31k-recipe freeze) and re-counts recipes
+  at most every 30 s (was values() on every message); messages wait for the index to finish; tick handler no longer
+  copies a list every tick; panel caches wrapped history (logVersion); claude.exe path cached (was walking folders every
+  message); Claude Code runs at BelowNormal CPU priority (ProcessPriority + Kernel32Ex via JNA, verified).
+- Not measured in game: a profiler (spark is installed in the pack: /spark profiler) is the way to confirm.
+- Tables in replies are flattened (cleanMarkdown/flattenTables); Sprout told not to name files.
+- Pack review (read-only, nothing changed): see the report given to the player. Highlights: perf mods already
+  present (Sodium, Lithium, FerriteCore, ModernFix, EntityCulling, ImmediatelyFast, spark); Xmx8192m with Xms256m on a
+  31.7 GB PC; 177 resource packs active, ~150 are PT-BR/Spanish/HTP translation packs; Complementary+Euphoria shaders,
+  Fresh Animations + EMF/ETF are the heavy visual parts; render/sim distance 10.
+
+## NEXT TIME
+- Verify in game: panel size and dragging, tables flattened, recipe index slicing (no hitch), EMI button, y/n typing.
+- If lag persists: run /spark profiler start, play a minute, /spark profiler stop, and read the report.
